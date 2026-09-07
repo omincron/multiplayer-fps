@@ -1,0 +1,11 @@
+[package]
+name = "common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

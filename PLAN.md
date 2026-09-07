@@ -590,3 +590,17 @@ braid_factor = [0.5, 0.5, 0.5] (placeholder) — fixed level table to
 
 This gives the next agent/session picking this up a trail of what was
 actually verified, not just what was written.
+
+---
+
+2026-09-07: Milestone 0 complete. Workspace created with `common` (lib),
+`server` and `client` (bins), edition 2024, resolver 3, shared versions via
+`[workspace.dependencies]`. Server deps: `common` only — picked plain
+`std::net`/threads over tokio, recorded in ARCHITECTURE.md §4.1. Client:
+`macroquad` 0.4 (added, not yet used — no window until milestone 8).
+`common`: `serde` 1 + `bincode` 2 (chosen over postcard because
+`config::standard().with_limit()` gives the MAX_PAYLOAD_BYTES read cap
+milestone 2 requires), `proptest` 1 as a dev-dep. No tests written, per the
+milestone. Gate: `cargo clean && cargo build --workspace` finished with zero
+warnings (grepped the raw output, 0 lines matching `warning`), and both
+binaries run and exit 0.

@@ -256,6 +256,12 @@ For `Event` messages only:
 - Rationale: a slow/blocking socket call must never stall the tick loop, and
   vice versa — this is what keeps tick rate (and therefore client fps
   perception) stable under load from many clients.
+- Implemented with `std::net::UdpSocket`, `std::thread` and
+  `std::sync::mpsc`; no async runtime. Two threads and one channel is the
+  whole design, so tokio would add a dependency and a second scheduling
+  model without removing any code. Decided at milestone 0 — revisit only
+  if the tick-rate-under-load test (§8.3) says the blocking socket is the
+  bottleneck.
 
 ### 4.2 Connection lifecycle
 

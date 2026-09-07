@@ -1,0 +1,10 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+
+# Deliberately no async runtime: ARCHITECTURE.md §4.1 specifies a blocking
+# socket thread plus a fixed-timestep simulation thread, which `std::net`
+# and `std::sync::mpsc` cover without pulling in tokio.
+[dependencies]
+common.workspace = true

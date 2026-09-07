@@ -1,0 +1,8 @@
+[package]
+name = "client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+common.workspace = true
+macroquad.workspace = true
