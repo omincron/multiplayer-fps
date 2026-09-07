@@ -50,8 +50,12 @@ actually works" doc.
 ## Milestone 1 — Maze generation (pure, in `common`)
 
 **Build:**
-- `common::maze::MazeData` struct and `generate(seed, width, height,
-  braid_factor) -> MazeData` per Architecture §5.
+- `common::maze::{MazeSpec, MazeGrid, MazeData}` and
+  `generate(spec: MazeSpec) -> MazeData` per Architecture §5.1.
+- Braiding operates on **dead-end cells**, not on all interior walls
+  (Architecture §5.2) — the all-walls version produces an open room with
+  pillars at the braid factors this project actually uses, and would fail
+  this milestone's own visual gate below.
 
 **Tests (write these before you trust the implementation — they are the
 actual spec):**
@@ -60,11 +64,22 @@ actual spec):**
   cases in CI, more locally while iterating.
 - No-isolated-cell test.
 - Border-wall test.
-- Determinism test (same inputs twice -> identical output).
-- Dead-end-count monotonicity test across at least 3 `braid_factor`
-  values, using the actual constants you intend to put in the level
-  table — this test should currently be **red** until you've picked real
-  level parameters, which is useful signal, not a problem to hide.
+- Wall-symmetry property test (Architecture §5.3 invariant 4): every
+  interior edge is stored identically in both cells that share it. Every
+  wall lives in two places, so this is the invariant that keeps the server
+  and the renderer agreeing about where the walls are.
+- Determinism test (same spec twice -> identical output). This one carries
+  more weight than it looks: `MazeSource::Generated` sends only the spec
+  and has the client regenerate, so non-determinism means the two sides
+  play on different mazes.
+- Dead-end **density** monotonicity (Architecture §5.3 invariant 5), in
+  two parts: (a) with grid size fixed, dead ends per open cell strictly
+  increases as `braid_factor` drops across at least 3 values; (b) the same
+  ordering holds across the real level table, where size varies too. Do
+  not assert on raw dead-end counts across the real table — area grows
+  every level, so that assertion passes even with the braiding pass
+  deleted. Part (b) should be **red** until you've picked real level
+  parameters, which is useful signal, not a problem to hide.
 
 **Gate:**
 - `cargo test -p common maze::` all green, including the proptest run.
@@ -77,7 +92,14 @@ actual spec):**
 ## Milestone 2 — Protocol types + serialization (`common::protocol`)
 
 **Build:**
-- All `ClientMsg`/`ServerMsg`/`EventKind` types from Architecture §3.2.
+- All `ClientMsg`/`ServerMsg`/`EventKind`/`MazeSource` types from
+  Architecture §3.2. Note what is deliberately absent: there is no
+  projectile type, because shooting is hitscan (Architecture §4.3) — don't
+  reintroduce one "for later".
+- Configure the (de)serializer with an explicit `MAX_PAYLOAD_BYTES` read
+  limit at the same time you define the types, not as a later hardening
+  pass — the socket is public and the default config pre-allocates from an
+  attacker-supplied length prefix.
 
 **Tests:**
 - Round-trip test for every enum variant (loop over a hand-built list of
@@ -85,11 +107,18 @@ actual spec):**
   it to this list, that's a real gap, so structure the test so a missing
   variant is obvious, e.g. exhaustive `match` with no wildcard arm in the
   test's variant-list constructor).
-- A size-budget test: serialize a `WorldState` with `MAX_PLAYERS` players
-  and a handful of projectiles, assert the byte length stays under your
-  chosen UDP payload budget (Architecture §3.2). This test should fail
-  loudly (not silently truncate) if someone bumps `MAX_PLAYERS` without
-  reconsidering the wire format.
+- A size-budget test covering **every** message variant, not just
+  `WorldState`: assert each serializes to under `MAX_PAYLOAD_BYTES`
+  (Architecture §3.2). Build `WorldState` with `MAX_PLAYERS` players, and
+  build `Welcome`/`LevelChanged` for the *largest* maze in the level
+  table — those two are the ones that blow the budget the moment anyone
+  puts an expanded grid back on the wire, and a `WorldState`-only test
+  exempts exactly them. It should fail loudly (not silently truncate) if
+  someone bumps `MAX_PLAYERS` or grows a level without reconsidering the
+  wire format.
+- A hostile-payload test: hand-build a short buffer declaring a huge
+  `String` length for `Join.name`, assert the deserializer errors promptly
+  instead of attempting the allocation.
 
 **Gate:**
 - `cargo test -p common protocol::` green.
@@ -108,7 +137,10 @@ actual spec):**
   `common/tests/` or a `#[cfg(test)]` module, not shipped code.
 
 **Tests:**
-- Delivery-under-loss test (Architecture §8.2, item 1).
+- Delivery-under-loss test (Architecture §8.2, item 1). Phrase it as
+  "delivered within `MAX_RETRY_ATTEMPTS * RETRY_INTERVAL_MS` for each of
+  these fixed seeds", not as an unbounded "eventually" — the layer gives
+  up by design, so an absolute claim is either flaky or false.
 - Exactly-once-under-duplication test (§8.2 item 2) — this is the one
   most likely to catch a real bug, don't skip it.
 - Ordering/staleness test under simulated reordering (§8.2 item 3).
@@ -124,8 +156,13 @@ actual spec):**
 ## Milestone 4 — Movement & collision (`common::sim`)
 
 **Build:**
-- `resolve_move(maze, pos, move_dir, radius) -> pos'` — circle-vs-grid
-  collision with wall sliding (not full-stop).
+- `resolve_move(maze, pos, move_dir, speed, dt_s, radius) -> pos'` — one
+  fixed simulation step of circle-vs-grid collision with wall sliding (not
+  full-stop). `move_dir` is normalised to at most unit length inside the
+  function; the caller supplies `speed`, never the client. The `dt_s`
+  parameter is what keeps client prediction and server simulation
+  integrating the same distance per second (Architecture §3.4) — a
+  signature without it silently ties movement speed to frame rate.
 
 **Tests:**
 - Straight corridor: moving into an end wall stops at the wall, not past
@@ -136,6 +173,12 @@ actual spec):**
   deliberately to catch that).
 - Moving through a doorway exactly at the collision radius boundary
   (edge case most likely to reveal an off-by-epsilon bug).
+- Same direction, twice the `dt_s`: assert twice the displacement (in open
+  space). This is the test that fails if someone drops `dt_s` and hardcodes
+  a per-call step.
+- `move_dir` with magnitude 100: assert the displacement equals the
+  unit-direction case. Without this, a client controls its own speed and
+  "the server is authoritative" is not true (Architecture §4.3).
 
 **Gate:**
 - `cargo test -p common sim::resolve_move` green.
@@ -169,23 +212,31 @@ actual spec):**
 ## Milestone 6 — Server: socket I/O + connection lifecycle (no game loop yet)
 
 **Build:**
-- `server::net`: bind `0.0.0.0:PORT`, recv loop, `SocketAddr <-> PlayerId`
-  table, `Join`/`Welcome`/`Rejected` handling, capacity limit, duplicate
-  name rejection, idle timeout.
+- `common::config::Config` (Architecture §9.1) **first** — `bind_addr`,
+  `tick_hz`, `max_players`, `client_timeout_ms`, retry values, with
+  `Default` built from the §9 constants. Every use site reads the config,
+  not the constant. Without this the tests below cannot be written at all:
+  they need `127.0.0.1:0`, a small player cap, and a sub-second timeout.
+- `server::net`: bind `config.bind_addr` (`0.0.0.0:PORT` in production,
+  per audit item §1.6), recv loop, `SocketAddr <-> PlayerId` table,
+  `Join`/`Welcome`/`Rejected` handling, capacity limit, duplicate name
+  rejection, idle timeout, `protocol_version`/`generator_version` check.
 - No movement/shooting simulation yet — players exist but don't move.
 
 **Tests (integration, real loopback sockets, `server/tests/`):**
 - Single client connects, receives `Welcome` with a valid `player_id` and
   the expected `maze`.
-- `MAX_PLAYERS`-plus-one test: fill capacity, assert the next connection
-  gets `Rejected` with a specific reason string, and assert the
-  already-connected clients are unaffected.
+- Capacity test: fill `config.max_players` (set it low for the test),
+  assert the next connection gets `Rejected` with a specific reason
+  string, and assert the already-connected clients are unaffected.
 - Duplicate-name rejection test.
 - Idle-timeout test: connect, go silent, assert a still-connected second
   client receives `PlayerLeft` for the timed-out player within a bounded
   window after the configured timeout (use a short timeout constant
   override for the test, don't wait 5 real seconds if avoidable).
-- Protocol-version-mismatch rejection test.
+- Protocol-version and generator-version mismatch rejection tests
+  (separate cases — the second is what stops client and server silently
+  regenerating different mazes from the same seed).
 
 **Gate:**
 - `cargo test -p server` green.
@@ -200,8 +251,16 @@ actual spec):**
 
 **Build:**
 - `server::world::World`, fixed-timestep sim thread wired to `net` per
-  Architecture §4.1, applying `common::sim::resolve_move` to player
-  inputs, broadcasting `WorldState` each tick.
+  Architecture §4.1, broadcasting `WorldState` each tick.
+- Per-player input **queue**, drained each tick, one `resolve_move` step
+  per queued input, capped at `MAX_INPUT_QUEUE` (Architecture §4.3).
+  Keeping only the newest input is the tempting shortcut and it is wrong:
+  network jitter routinely delivers two inputs in one tick window, and
+  discarding one shortens that player's movement and triggers a
+  reconciliation correction for a player who did nothing unusual.
+- Echo the highest consumed `input_tick` per player as
+  `PlayerSnapshot.last_input_tick` — Milestone 10 cannot reconcile
+  without it, so it is not optional plumbing.
 
 **Tests:**
 - Two fake clients, one sends movement input, assert the *other* client's
@@ -210,6 +269,13 @@ actual spec):**
 - A client sending input that would walk through a wall: assert the
   broadcast position stops at the wall (this re-validates `resolve_move`
   is actually wired in, not just unit-tested in isolation).
+- Two inputs delivered inside one tick window: assert the player advances
+  two steps, not one. Then `MAX_INPUT_QUEUE + 5` at once: assert movement
+  is capped rather than scaling with the flood.
+- `last_input_tick` echo test: send inputs 1..5, assert the snapshot
+  reports the highest tick actually consumed (not the highest received,
+  and not zero) — a stubbed-out field here silently disables Milestone
+  10's reconciliation without failing any of its own tests.
 - **Tick-rate-under-load test** (Architecture §8.3, the big one): spin up
   10+ fake clients sending input continuously for a fixed duration
   (10-30 seconds is enough for CI; save the full 3-minute run for
@@ -229,7 +295,11 @@ actual spec):**
 
 **Build:**
 - CLI prompts exactly per Architecture §6.1 (`Enter IP Address:`,
-  `Enter Name:`, `Starting...`), connect handshake with retry/timeout.
+  `Enter Name:`, `Starting...`), connect handshake retrying on
+  `JOIN_RETRY_BASE_MS` with doubling backoff up to `JOIN_MAX_ATTEMPTS`
+  (§9 — these are the handshake's own constants; the reliability layer's
+  retry constants belong to the event channel and are not reusable here).
+  A `Rejected` is final: print the reason, exit non-zero, do not retry.
 - Open a macroquad/ggez window on success, render *something* (even just
   a blank frame + fps counter) to prove the pipeline works end to end.
 - fps counter using the rolling-average function from Architecture §6.5 —
@@ -242,10 +312,12 @@ actual spec):**
   reported value is the rolling average, not the last instantaneous
   value.
 - Integration test the connect handshake against a scripted fake
-  responder (per Architecture §8.4): assert correct retry count and
-  backoff timing on no response, and a clear failure message/exit code
-  when retries are exhausted, and correct success path when a `Welcome`
-  arrives after 1-2 dropped attempts.
+  responder (per Architecture §8.4): assert the retry count and backoff
+  timing against `JOIN_MAX_ATTEMPTS` / `JOIN_RETRY_BASE_MS` (import them;
+  do not write the numbers into the test), a clear failure message and
+  non-zero exit when attempts are exhausted, the success path when a
+  `Welcome` arrives after 1-2 dropped attempts, and immediate exit without
+  further retries on `Rejected`.
 
 **Gate:**
 - `cargo test -p client` green.
@@ -258,9 +330,14 @@ actual spec):**
 ## Milestone 9 — Client: raycasting renderer against a static maze
 
 **Build:**
-- `client::render::raycast`: DDA raycasting against the `MazeData`
-  received in `Welcome`, one vertical strip per screen column, flat-shaded
-  walls. No other players yet, no movement yet — just look around a
+- `client::render::raycast`: DDA raycasting against the `MazeData` the
+  client builds from the `MazeSource` in `Welcome` (regenerating it
+  locally for `Generated`, using the grid directly for `Custom`), one
+  vertical strip per screen column, flat-shaded walls.
+- Assert the §5.3 invariants on the maze the client just built, at build
+  time. It is cheap, and it turns "the two sides generated different
+  mazes" into an immediate loud failure instead of a confusing rendering
+  bug two milestones later. No other players yet, no movement yet — just look around a
   static maze from a fixed or keyboard-controlled camera.
 
 **Tests:**
@@ -283,17 +360,32 @@ actual spec):**
 ## Milestone 10 — Client-side prediction + camera movement
 
 **Build:**
-- Wire local input -> immediate local `resolve_move` call -> camera moves
-  instantly (Architecture §6.3), independent of server round-trip.
-- Send `Input` to server at `CLIENT_INPUT_HZ`.
+- Accumulate elapsed time and emit exactly one `Input` per whole
+  `INPUT_DT_MS`; for each emitted input, send it *and* advance local
+  prediction by that same one `resolve_move` step. Do **not** step
+  prediction once per rendered frame — at 120fps that integrates four
+  times the distance the 30Hz server does, and every reconciliation snaps
+  the player backwards (Architecture §6.2).
+- Keep a `(input_tick, input, predicted_pos_after)` history buffer sized
+  `CLIENT_INPUT_HZ * MAX_RTT_S`.
+- Reconcile against `PlayerSnapshot.last_input_tick`: compare the server's
+  position to the *matching* history entry, and on divergence reset and
+  replay the newer buffered inputs (Architecture §6.3).
 
 **Tests:**
-- This is largely a wiring milestone; the underlying `resolve_move` logic
-  is already tested in Milestone 4. Add one integration-style test: drive
-  synthetic input through the client's prediction path and assert the
-  rendered/predicted position updates on the same frame as the input,
-  without waiting for a network round trip (can be tested by asserting
-  against a mock/no-op network layer that never responds).
+- Drive synthetic input through the client's prediction path against a
+  mock network layer that never responds, and assert the predicted
+  position updates on the same frame as the input, with no round trip.
+- Frame-rate independence: run the same one second of held input at a
+  simulated 30fps and at 120fps, assert the predicted displacement matches
+  within epsilon. This is the direct test for the
+  step-per-frame-vs-step-per-input bug above, and it fails loudly on it.
+- Reconciliation unit test (Architecture §8.1): feed a snapshot whose
+  `last_input_tick` is several inputs behind the newest prediction, with
+  the server agreeing about that older position. Assert the correction is
+  zero after replay. An implementation that compares against the newest
+  prediction instead produces a non-zero correction every tick here —
+  that is the rubber-banding bug, caught without a live server.
 
 **Gate:**
 - Manual: with a running server, move around — camera must respond
@@ -330,6 +422,17 @@ actual spec):**
 ## Milestone 12 — Remote player interpolation
 
 **Build:**
+- Server-clock offset estimation from `Welcome`/`Pong`
+  `(server_tick, server_time_ms)` plus measured RTT, smoothed — not the
+  latest raw sample, and never anchored to "the first tick I received"
+  (Architecture §6.4). The render target is a local wall-clock time and
+  snapshots carry a tick counter; without this mapping there is nothing to
+  interpolate against.
+- Per-remote-player snapshot buffer of `SNAPSHOT_BUFFER_LEN` (5), not 2:
+  at 30Hz, rendering 100ms behind needs the 4th and 5th most recent
+  snapshots. A 2-entry buffer spans 33ms, so every frame silently falls
+  through to extrapolation and you get the exact choppiness this milestone
+  is meant to remove.
 - Replace raw-snapshot rendering of remote players with the interpolation/
   bounded-extrapolation scheme from Architecture §6.4.
 
@@ -340,6 +443,14 @@ actual spec):**
   window (extrapolated expected value), query time beyond the
   extrapolation cap (held at last-known position, not runaway
   extrapolation).
+- Buffer-length test: fill a buffer at `SERVER_TICK_HZ` for a second,
+  query at `now - INTERP_DELAY_MS`, and assert the **interpolated** branch
+  was taken. Without this, a too-short buffer degrades every query to
+  extrapolation and the three cases above still pass, because they hand
+  the function timestamps chosen to bracket.
+- Clock-offset test: feed `Pong`s with a known server time and a simulated
+  RTT plus one badly delayed outlier sample, assert the smoothed offset
+  ignores the outlier rather than tracking it.
 
 **Gate:**
 - `cargo test -p common interp::` green (or wherever this lives).
@@ -379,12 +490,22 @@ actual spec):**
 - `server::levels` table (≥3 entries) wired to actually trigger
   `LevelChanged` (pick a trigger condition — e.g. time-based or
   score-based — and document the choice), client handling of
-  `LevelChanged` (swap `MazeData`, reset local prediction state).
+  `LevelChanged` (regenerate `MazeData` from the `MazeSource`, reset local
+  prediction state and all snapshot buffers).
+- `level_epoch` incremented per change, stamped on every `WorldState`, and
+  **checked on the client**: snapshots whose epoch doesn't match the maze
+  currently held are dropped, not rendered (Architecture §4.4).
 
 **Tests:**
-- Reuses Milestone 1's monotonic-difficulty test against the *actual*
-  configured level table (if that test was left red/pending earlier,
-  it must be green now with real numbers).
+- Reuses Milestone 1's dead-end-density test against the *actual*
+  configured level table (part (b), left red/pending earlier — it must be
+  green now with real numbers).
+- Epoch-mismatch test: deliver a `WorldState` with a `level_epoch` the
+  client has no maze for and assert it is discarded rather than rendered.
+  Simulate the real race by dropping the `LevelChanged` datagram once —
+  it is retried at 100ms while snapshots arrive every 33ms, so several
+  mismatched snapshots always arrive first; rendering them puts players
+  inside walls.
 - Integration test: server progresses through levels on the configured
   trigger, connected fake client receives `LevelChanged` with a
   genuinely different (larger/harder) maze each time.
@@ -436,9 +557,14 @@ Architecture §7):
    confirm the generator name/seed is visibly logged or shown, per
    Architecture §7.1, so it's unambiguous during grading.
 3. **Maze editor** — build only after core game is fully gated; export/
-   import format must round-trip through the same `MazeData` serde types
+   import format must round-trip through the same `MazeGrid` serde types
    used by the wire protocol (add a round-trip test for the file format,
-   same pattern as Milestone 2).
+   same pattern as Milestone 2). Two non-negotiables: toggling an edge
+   writes **both** cells' wall bits (Milestone 1's symmetry test exists
+   for this — run it over editor output too), and a loaded `--maze` file
+   is validated against the full §5.3 invariant list *and* the
+   `MAX_PAYLOAD_BYTES` limit before it is served to clients, since a
+   custom maze travels as an expanded grid rather than a seed.
 4. **Host history / GUI launcher** — lowest priority, build last, must not
    replace or break the CLI prompt flow from Milestone 8.
 
