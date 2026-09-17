@@ -717,3 +717,50 @@ No `#[allow(dead_code)]` anywhere (grepped `common/src/`, confirmed empty)
 
 Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
 -p common` — 12/12 green (7 maze + 5 protocol).
+
+2026-09-17: Milestone 3 complete (`common::reliability`, ARCHITECTURE.md
+§3.3). `Sender<T>` (generic over payload — doesn't need to know about
+`protocol::EventKind`) tracks a retry table and, on `due_for_retry(now_ms)`,
+returns both what to resend and what just gave up (the caller logs
+give-ups; this module does no I/O/logging itself, per `common`'s
+zero-I/O contract — including no real clock reads, which is why every
+function takes `now_ms: u64` as a parameter instead of reading a clock).
+`Receiver` is a bounded-ring dedupe set (`accept(event_id) -> bool`, true
+only the first time).
+
+Give-up timing note for whoever wires this into the real server: an event
+is dropped as given-up on the retry check *after* it reaches
+`max_attempts`, not the moment it reaches it — so worst-case time-to-give-up
+is `max_attempts * retry_interval_ms`, matching §8.2's own test wording
+exactly, but if you were expecting `(max_attempts - 1) * retry_interval_ms`
+this is why the numbers look one interval too long. Deliberate, not a bug.
+
+Test harness (`LossyChannel`, inside `#[cfg(test)] mod tests` — never
+shipped, per this milestone's own instruction): seeded `ChaCha8Rng`,
+`transmit()` drops/duplicates one message, `reordered_batch()` shuffles a
+whole batch. All three §8.2 tests run across 8 fixed seeds (gate asks for
+"at least 3").
+
+Scope call worth flagging for whoever picks this up next: §8.2's third
+test ("reordering... a stale position doesn't overwrite a newer one") is
+about *state* messages, not the `Event` channel this module actually
+implements — `WorldState` is explicitly unordered/latest-wins/no-retry
+(§3.1) and has no consumer built yet (that's Milestone 7+ server-side,
+Milestone 12 client-side interpolation). I wrote it as a self-contained
+test against a minimal `LatestTickWins` reducer defined *inside the test
+module only* — it validates the general pattern the real `WorldState`
+consumer will need, using the same shared fake channel, without adding
+speculative production API to `common::reliability` for a consumer that
+doesn't exist yet. When Milestone 7/12 build the real thing, this test
+doesn't need to move — it already proves the pattern; the real consumer
+gets its own tests against its own types.
+
+Verified both to-be-caught bugs are actually caught before trusting the
+suite: temporarily short-circuited `due_for_retry` to never resend
+(`delivery_under_loss_within_bound` failed, "event 8 never delivered") and
+`Receiver::accept` to never dedupe
+(`receiver_fires_exactly_once_under_duplication` failed, "left: 2, right:
+1"), then reverted both. Neither survived in the committed code.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
+-p common` — 17/17 green (7 maze + 5 protocol + 5 reliability).
