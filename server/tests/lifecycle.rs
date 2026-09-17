@@ -3,77 +3,14 @@
 //! instruction that these drive the server with real `UdpSocket`s standing
 //! in for clients.
 
-use std::net::{SocketAddr, UdpSocket};
+mod support;
+
 use std::time::Duration;
 
-use common::config::{Config, GENERATOR_VERSION, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION};
+use common::config::{GENERATOR_VERSION, PROTOCOL_VERSION};
 use common::maze::MazeSource;
-use common::protocol::{self, ClientMsg, EventKind, ServerMsg};
-
-const DEFAULT_TEST_TIMEOUT: Duration = Duration::from_millis(300);
-
-/// `127.0.0.1:0` (OS-assigned port), never `0.0.0.0:PORT` — production
-/// binds the latter (§1.6), tests always the former (§8.3).
-fn test_config(max_players: usize, client_timeout_ms: u64) -> Config {
-    Config {
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        max_players,
-        client_timeout_ms,
-        ..Config::default()
-    }
-}
-
-fn spawn_server(config: Config) -> SocketAddr {
-    server::net::spawn(config).expect("server failed to bind")
-}
-
-/// A fake client: its own loopback socket with a bounded recv timeout, so
-/// a test expecting "nothing else arrives" doesn't hang forever.
-struct FakeClient {
-    socket: UdpSocket,
-    server_addr: SocketAddr,
-}
-
-impl FakeClient {
-    fn connect(server_addr: SocketAddr) -> Self {
-        Self::connect_with_timeout(server_addr, DEFAULT_TEST_TIMEOUT)
-    }
-
-    fn connect_with_timeout(server_addr: SocketAddr, timeout: Duration) -> Self {
-        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.set_read_timeout(Some(timeout)).unwrap();
-        FakeClient { socket, server_addr }
-    }
-
-    fn send(&self, msg: &ClientMsg) {
-        let bytes = protocol::encode(msg).unwrap();
-        self.socket.send_to(&bytes, self.server_addr).unwrap();
-    }
-
-    fn recv(&self) -> ServerMsg {
-        let mut buf = [0u8; MAX_PAYLOAD_BYTES];
-        let (len, _addr) = self
-            .socket
-            .recv_from(&mut buf)
-            .expect("no response from server within the test timeout");
-        protocol::decode(&buf[..len]).expect("malformed ServerMsg")
-    }
-
-    fn try_recv(&self) -> Option<ServerMsg> {
-        let mut buf = [0u8; MAX_PAYLOAD_BYTES];
-        let (len, _addr) = self.socket.recv_from(&mut buf).ok()?;
-        Some(protocol::decode(&buf[..len]).expect("malformed ServerMsg"))
-    }
-
-    fn join(&self, name: &str) -> ServerMsg {
-        self.send(&ClientMsg::Join {
-            name: name.to_string(),
-            protocol_version: PROTOCOL_VERSION,
-            generator_version: GENERATOR_VERSION,
-        });
-        self.recv()
-    }
-}
+use common::protocol::{ClientMsg, EventKind, ServerMsg};
+use support::{spawn_server, test_config, FakeClient};
 
 #[test]
 fn single_client_connects_and_receives_welcome() {
@@ -113,8 +50,9 @@ fn capacity_rejects_beyond_max_and_existing_clients_unaffected() {
 
     // The already-connected clients must still be responsive, not silently
     // affected by the capacity check that rejected `c`. `a` may also have
-    // a `PlayerJoined` event about `b` queued ahead of the Pong (a
-    // legitimate race, not a bug), so skip past anything that isn't it.
+    // a `PlayerJoined` event about `b` (or now a `WorldState`) queued
+    // ahead of the Pong (a legitimate race, not a bug), so skip past
+    // anything that isn't it.
     a.send(&ClientMsg::Ping { nonce: 42 });
     loop {
         match a.recv() {
@@ -122,7 +60,7 @@ fn capacity_rejects_beyond_max_and_existing_clients_unaffected() {
                 assert_eq!(nonce, 42);
                 break;
             }
-            ServerMsg::Event { .. } => continue,
+            ServerMsg::Event { .. } | ServerMsg::WorldState { .. } => continue,
             other => panic!("expected Pong, got {other:?}"),
         }
     }
@@ -149,7 +87,7 @@ fn idle_timeout_broadcasts_player_left_to_a_still_connected_client() {
     let addr = spawn_server(test_config(20, 150));
 
     let a = FakeClient::connect(addr);
-    let b = FakeClient::connect_with_timeout(addr, Duration::from_millis(20));
+    let b = support::FakeClient::connect_with_timeout(addr, Duration::from_millis(20));
 
     let ServerMsg::Welcome { player_id: a_id, .. } = a.join("a") else {
         panic!("expected Welcome for a")

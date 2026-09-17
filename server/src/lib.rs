@@ -3,3 +3,4 @@
 //! integration tests.
 
 pub mod net;
+pub mod world;

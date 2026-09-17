@@ -958,3 +958,101 @@ deleted after; nothing from it was committed.
 
 Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
 --workspace` green (27 common + 6 server). Manual end-to-end check passed.
+
+2026-09-17: Milestone 7 complete (`server::world`, ARCHITECTURE.md §4.1/
+§4.3) on `server-track`.
+
+**Refactor**: per PLAN.md's own Milestone 7 build note ("`server::world::
+World`... wired to `net`"), moved Milestone 6's connection-lifecycle
+`Server`/`lifecycle_loop` out of `net.rs` and into a new `world.rs` as
+`World`/`run`, extended with real movement. `net.rs` is now thin: bind,
+`io_loop` (blocking recv/decode/forward), a `send()` helper, and `spawn`/
+`spawn_with_maze` (the latter added so tests can inject a deterministic
+maze — see below). This matches ARCHITECTURE.md §2's own file-layout
+description (`net.rs` = "recv loop, per-client address<->id table",
+`world.rs` = "authoritative game state + tick loop") more closely than
+Milestone 6's single-file version did; nothing about Milestone 6's tests
+needed to change beyond the import path.
+
+Tick loop (`world::run`): fixed `1000/config.tick_hz` ms timestep via
+`Instant`-based deadlines, not a plain sleep loop — `rx.recv_timeout`
+blocks until either a message arrives or the next tick deadline, so idle
+periods don't busy-spin and traffic doesn't delay the tick. Falls behind
+(debugger pause, sustained overload) → resyncs to now rather than bursting
+through a catch-up backlog, which would only compound the problem under
+real load.
+
+Movement: per-player `VecDeque<QueuedInput>`, drained oldest-first, capped
+at `MAX_INPUT_QUEUE` (6) *consumed per tick* — **the queue itself is
+unbounded on insertion**, only consumption is capped. §4.3 says a flooding
+client's excess inputs "just back up" (i.e. get consumed on a later tick),
+not that they're discarded; capping insertion instead would silently drop
+input; the flood test below is specifically what confirms this
+distinction, not the cap in general. `last_input_tick` is the highest
+*consumed* tick (`.max()`), guarded even though FIFO draining should
+already guarantee monotonicity — cheap insurance if that ever changes.
+`WorldState` is encoded once per tick and sent to every player from the
+same byte buffer, not re-encoded per recipient.
+
+**Real bug caught by the tests, not hypothetical**: the initial spawn-point
+formula was `dimension as f32 / 2.0 + 0.5`, which looks like "grid center"
+but for a degenerate `height = 1` grid evaluates to exactly `1.0` —
+*outside* the valid `[0, 1)` range, so `circle_fits`'s bounds check
+rejected every single movement attempt from spawn, silently. The
+`input_that_walks_into_a_wall_stops_at_the_wall` test (using a 4x1
+corridor fixture) caught this immediately: position never left spawn at
+all. Fixed by computing the center **cell index** via integer division
+first (`width / 2`, `height / 2`), then `+ 0.5` — correct for every grid
+size including degenerate ones. Even-dimension mazes (the 20x20 and 30x30
+used by the other tests) were unaffected either way, which is exactly why
+this only showed up once a test used an odd/degenerate dimension
+deliberately.
+
+**Determinism for movement tests**: added `net::spawn_with_maze(config,
+maze: MazeData)` alongside `spawn` — production still generates a real
+random maze, but tests inject a hand-built one (`server/tests/support/
+mod.rs`: `walled_grid`/`open`, same pattern as `common::sim`'s Milestone 4
+test helpers, duplicated locally since those are private to `common`'s own
+test module). `open_room(w, h)` for movement/flood/tick-rate tests (every
+direction unobstructed from spawn) and `corridor_with_wall_east_of_spawn()`
+for the wall-stop test (relies on knowing `World`'s exact spawn formula, so
+the two are coupled by design — a spawn-formula change should re-derive
+this fixture's expected wall position, not just re-run the test and see).
+
+**Test-sharing wrinkle**: moved `FakeClient` etc. into `server/tests/
+support/mod.rs` (the standard `mod support;`-per-file pattern, since each
+top-level file under `tests/` compiles as its own separate binary and
+can't otherwise share code). Side effect: each binary only uses a subset
+of the shared helpers, so rustc's dead-code lint fires per-binary false
+positives (a function `lifecycle.rs` doesn't call looks unused from ITS
+compilation even though `tick_loop.rs` uses it, and vice versa). Added
+`#![allow(dead_code)]` to `support/mod.rs` specifically, with a comment
+distinguishing this from Milestone 2's no-`#[allow(dead_code)]` rule —
+that rule was about a real gap (an unused protocol variant) staying
+visible; this is a known Rust tooling limitation for shared test code, not
+a gap to hide. Confirmed this doesn't mask anything by running under
+`RUSTFLAGS="-D warnings" cargo test --no-run` before and after adding it.
+
+Tests (`server/tests/tick_loop.rs`, 6 total): movement reflected in
+another client's `WorldState` within a bounded few-tick window (not
+instantly); wall-stop (re-validates `resolve_move` is actually wired in,
+not just unit-tested in isolation, per PLAN's own framing); two inputs in
+one tick window advance two steps; `MAX_INPUT_QUEUE + 5` flood caps at
+exactly `MAX_INPUT_QUEUE` steps on the first tick — the first
+`WorldState` showing *any* movement is what's checked, since later ticks
+would also reflect the backed-up remainder and defeat the assertion if
+checked too late; `last_input_tick` echoes 5 (highest consumed) for 5
+sent inputs, not 0 and not something else; tick-rate-under-load with 10
+clients sending input continuously for 10s (full 3-minute run is the
+pre-submission manual soak test, §8.5, not this one) — achieved ~30.76Hz
+against a 30Hz target, comfortably inside the 0.8x tolerance. All 12
+server tests (6 lifecycle + 6 tick_loop) run 5x in a row, zero flakiness.
+
+Load-test result **persisted**, not a one-time terminal glance (this
+milestone's own gate instruction): appended to `target/tick_rate_log.txt`
+(gitignored, local) on every run, plus `eprintln!` for CI visibility.
+Latest: `clients=10 target_hz=30 achieved_hz=30.76 ticks=302 secs=9.82`.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings, including
+under `RUSTFLAGS="-D warnings"`. `cargo test --workspace` — 39/39 green
+(27 common + 6 lifecycle + 6 tick_loop).
