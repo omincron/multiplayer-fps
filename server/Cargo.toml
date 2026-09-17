@@ -8,3 +8,4 @@ edition.workspace = true
 # and `std::sync::mpsc` cover without pulling in tokio.
 [dependencies]
 common.workspace = true
+rand.workspace = true

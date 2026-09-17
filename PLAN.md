@@ -890,3 +890,71 @@ doesn't need it yet but was fast-forwarded too since it hadn't diverged.
 Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
 -p common` — 27/27 green (7 maze + 5 protocol + 5 reliability + 9 sim + 1
 config).
+
+2026-09-17: Milestone 6 complete (`server::net`, ARCHITECTURE.md §4.1/§4.2)
+on `server-track` (rebased onto the `common::config::Config` commit above
+first). Socket I/O thread (blocking `recv_from`, deserializes, forwards
+`(SocketAddr, ClientMsg)` over an `mpsc` channel, never touches game state)
+plus a connection-lifecycle thread that owns all mutable state — same
+two-thread shape §4.1 describes for the real simulation thread, just with
+no movement yet. The lifecycle thread wakes at least every
+`LIFECYCLE_TICK_MS = 20` (`recv_timeout`, not a busy spin) even with no
+incoming message, so idle-timeout checks and event retries happen on a
+steady cadence independent of traffic.
+
+**Structural change**: `server` was bin-only; added `server/src/lib.rs`
+(`pub mod net;`) because `server/tests/` integration tests can't link a
+bin-only crate. `main.rs` now does `use server::net;` instead of
+`mod net;`. Anyone adding another server module later should add it to
+`lib.rs`, not declare it again in `main.rs`.
+
+Connection lifecycle: `Join` checked in order — protocol version, then
+generator version (separate rejection reasons: a generator mismatch is
+what stops two sides silently regenerating different mazes from the same
+seed, so it's diagnostically distinct from a protocol mismatch), then
+capacity, then duplicate name — assign `PlayerId`, reply `Welcome` with a
+maze generated once at server startup (no `server::levels` table yet,
+that's Milestone 14; every joiner gets the same maze until then), broadcast
+`PlayerJoined` to everyone else. Idle timeout and `Leave` both funnel
+through one `remove_player`, which broadcasts `PlayerLeft`. `Ping`/`Input`
+both count as the keep-alive §4.2 describes ("no Input/Ping received");
+`Ack` deliberately does not extend it, matching that wording exactly.
+
+Reliability layer (Milestone 3) is wired in for real here, not just
+tested in isolation: **one `reliability::Sender<EventKind>` per connected
+player** (not one global sender) — necessary because a broadcast event
+like `PlayerJoined` has multiple independent recipients, each of whom
+might ack at a different time or not at all, and the Milestone 3 `Sender`
+only models one recipient's retry state per instance. The lifecycle loop
+calls `due_for_retry` on every player's sender every tick and
+retransmits/logs give-ups accordingly.
+
+**Known gap, expected until Milestone 7**: a newly-joined player currently
+has no way to learn about already-connected players — `PlayerJoined` only
+goes to "everyone else" (per §4.2's own wording), and there's no
+`WorldState` broadcast yet for a new joiner to learn the roster from.
+Not a bug to fix now, just don't be surprised by it.
+
+Tests (`server/tests/lifecycle.rs`, real loopback `UdpSocket`s, no
+mocking): single-client Welcome, capacity (reject the 3rd of a 2-cap
+server with `"server full"`, verify the first two are still responsive via
+Ping/Pong), duplicate name, idle timeout (150ms configured timeout, second
+client polls for the `PlayerLeft` event while pinging to stay alive
+itself), and the two version-mismatch cases. One real bug caught and fixed
+during development, not a hypothetical: the capacity test's first version
+assumed the very next message after a `Ping` would be its `Pong`, but
+client `a` can have a `PlayerJoined` event (about `b`'s join) queued ahead
+of it — a genuine race, not a server defect. Fixed by looping past `Event`
+messages until the `Pong` arrives. Ran the suite 5x in a row before
+trusting it (timing-sensitive tests: idle-timeout polling, capacity race).
+
+Per the gate's manual-check instruction, ran the real `server` binary as
+its own OS process and hit it with a standalone scratch client (a separate
+tiny Cargo project in the scratch directory depending on `common` by path,
+not sharing any code with the test harness) sending a hand-built `Join` —
+got `Welcome { player_id: 1, ... }` back over real loopback UDP,
+independent of any assumption baked into `server/tests/`. Scratch project
+deleted after; nothing from it was committed.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
+--workspace` green (27 common + 6 server). Manual end-to-end check passed.
