@@ -6,4 +6,7 @@
 //! lets the whole thing be tested without a server or a window
 //! (ARCHITECTURE.md §2).
 
+pub mod config;
 pub mod maze;
+pub mod protocol;
+pub mod types;

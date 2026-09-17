@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 /// Bump on any change to `generate`'s output for a given `MazeSpec` — it is
 /// checked against the peer's version alongside `PROTOCOL_VERSION` so a
 /// generator drift fails loudly instead of two players walking around
-/// different mazes (ARCHITECTURE.md §3.2, §5.2).
-pub const GENERATOR_VERSION: u16 = 1;
+/// different mazes (ARCHITECTURE.md §3.2, §5.2). Defined in
+/// `common::config`, the single source of truth for every constant in §9 —
+/// re-exported here so maze code can keep writing `maze::GENERATOR_VERSION`.
+pub use crate::config::GENERATOR_VERSION;
 
 pub const GENERATOR_NAME: &str = "recursive-backtracker+braid";
 

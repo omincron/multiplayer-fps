@@ -663,3 +663,57 @@ committing; it was never shipped code.
 Gate: `cargo clean && cargo build --workspace` — zero warnings (grepped, 0
 matches). `cargo test -p common maze::` — 7/7 green, including the proptest
 run (default ~256 cases).
+
+2026-09-17: Milestone 2 complete (`common::protocol`, ARCHITECTURE.md §3.2).
+`ClientMsg`/`ServerMsg`/`EventKind`/`PlayerSnapshot` as specified. Two new
+supporting modules this milestone needed that weren't built yet:
+- `common::config` — the §9 "single source of truth" constants (not the
+  §9.1 runtime `Config` struct, which is still Milestone 6's job). Moved
+  `GENERATOR_VERSION` here from `common::maze` (Milestone 1 had defined it
+  locally since `common::config` didn't exist yet); `maze.rs` now does
+  `pub use crate::config::GENERATOR_VERSION` so nothing calling
+  `maze::GENERATOR_VERSION` broke. **If you add a new §9 constant, put it
+  in `config.rs`, not next to whatever module first needed it** — this is
+  exactly the drift the architecture doc warns about.
+- `common::types` — `PlayerId`/`Tick` type aliases and `Vec2` (minimal:
+  just the struct + `new`/`ZERO`; arithmetic ops deliberately not added
+  yet since nothing needs them until Milestone 4's `sim.rs`).
+
+`MazeSource` stays defined in `common::maze` (Milestone 1's call, logged
+there) — `protocol.rs` imports it rather than redefining it, matching
+ARCHITECTURE.md §3.2's usage even though the type itself lives in the maze
+module.
+
+Serialization: `bincode::config::standard().with_limit::<MAX_PAYLOAD_BYTES>()`
+via `bincode::serde::{encode_to_vec, decode_from_slice}`, wrapped as
+`protocol::encode`/`protocol::decode` so every call site gets the byte
+limit automatically — no call site builds its own config.
+
+Tests (`common/src/protocol.rs`, bottom `mod tests`): round-trip tests for
+every `ClientMsg`/`ServerMsg`/`EventKind` variant, each backed by an
+exhaustive `match` with no wildcard arm (adding a variant without updating
+the match is a compile error — the nudge to also add a sample instance,
+since nothing *forces* that half); a payload-budget test covering every
+variant plus a `WorldState` built with `MAX_PLAYERS` (20) players, not 10;
+and a hostile-payload test.
+
+The hostile-payload test is hand-built, not guessed: I read bincode
+2.0.1's actual source (`varint/mod.rs`, `features/serde/ser.rs`,
+`features/impl_alloc.rs`) rather than assume the wire format, then verified
+empirically before trusting it — encoded a real `Join{name:"george",..}`
+and confirmed the byte prefix is `[0x00 (variant 0), 0x06 (name len), ...]`
+matching what the source predicts, and confirmed the malicious buffer
+`[0x00, 253, 0xFF*8]` (declares a `u64::MAX`-length name) decodes to
+`Err(LimitExceeded)` specifically — not some other error that would pass
+the test for the wrong reason. Also confirmed from source that
+`Vec<T>`/`String` decode calls `decoder.claim_container_read(len)` *before*
+allocating, which is why a limited config rejects the huge declared length
+instead of attempting the allocation the attack is going for. Both
+verification snippets were temporary `#[ignore]`/debug-`eprintln!` tests,
+removed before committing.
+
+No `#[allow(dead_code)]` anywhere (grepped `common/src/`, confirmed empty)
+— per Milestone 2's own instruction.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
+-p common` — 12/12 green (7 maze + 5 protocol).
