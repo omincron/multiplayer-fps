@@ -604,3 +604,62 @@ milestone 2 requires), `proptest` 1 as a dev-dep. No tests written, per the
 milestone. Gate: `cargo clean && cargo build --workspace` finished with zero
 warnings (grepped the raw output, 0 lines matching `warning`), and both
 binaries run and exit 0.
+
+2026-09-17: Milestone 1 complete (`common::maze`, ARCHITECTURE.md §5).
+`MazeSpec`/`MazeGrid`/`MazeSource`/`MazeData` per §5.1, `generate(spec) ->
+MazeData` per §5.2: randomized recursive backtracker (iterative, explicit
+stack — no recursion depth risk on large mazes) for the spanning tree, then
+a braiding pass over dead-end cells only (candidates restricted to walls
+with an in-bounds neighbour, so border walls — §5.3 invariant 3 — are never
+touched). `MazeSource` and `MazeData` live in `common::maze` even though
+ARCHITECTURE.md §3.2 discusses `MazeSource` under the protocol section;
+`common::protocol` (Milestone 2) should `pub use maze::MazeSource` rather
+than redefining it.
+
+RNG: added `rand` + `rand_chacha` as workspace deps (not in the original
+Cargo.toml), seeded from `MazeSpec.seed` via `ChaCha8Rng::seed_from_u64`.
+ChaCha8 is a pure software algorithm with no OS-entropy dependency, so
+output is reproducible across machines given the same crate versions —
+Cargo.lock is committed, so that holds. **Gotcha for whoever touches this
+next**: edition 2024 makes `gen` a reserved keyword, so `Rng::gen` must be
+called as `rng.r#gen::<f32>()`, not `rng.gen::<f32>()` (the latter is a
+syntax error, not a warning).
+
+Tests (`common/src/maze.rs`, bottom `mod tests`): determinism, different-seed
+divergence, `braid_factor = 0.0` reproduces the bare spanning tree's
+dead-end count exactly, a `proptest` property test over random `(seed,
+width, height, braid_factor)` asserting all four §5.3 structural invariants
+(connectivity, no isolated cells, closed borders, wall symmetry), and two
+dead-end-*density* monotonicity tests for §5.3 invariant 5 — one with grid
+size held fixed, one across a placeholder 3-entry table
+`(20,20,0.6),(30,30,0.3),(40,40,0.05)` standing in for `server::levels`
+until Milestone 14 builds the real one (that milestone should replace the
+placeholder table in a *new* test with the real one, per PLAN.md's own
+instruction — don't just edit this test's numbers). Both density tests
+average over 40 seeds per data point because the metric is stochastic per
+seed; a single-seed trial is not reliable evidence of monotonicity either
+way, in either direction. All passed on the first parameter choice, no
+tuning needed.
+
+Visibility decision worth knowing before Milestone 16 (maze editor, §7.3):
+the four §5.3 invariant-check helpers (`is_fully_connected`,
+`has_no_isolated_cell`, `borders_are_closed`, `walls_are_symmetric`) are
+`#[cfg(test)] pub(crate)` — nothing outside tests calls them yet, and
+Milestone 2's "no `#[allow(dead_code)]`" instruction implies the converse
+too: don't pre-empt a real dead-code warning by adding unused-but-`pub`
+surface area before something real needs it. When the editor's `--maze`
+loader needs to validate a file against the full invariant list, promote
+these to real `pub` items called from that load path instead of
+reimplementing the flood fill etc. there. `dead_end_density`, by contrast,
+is already plain `pub` (no `#[cfg(test)]`) because Milestone 14's reuse of
+it is already committed in this file, not speculative.
+
+Manually ASCII-printed one generated maze (20x12, seed 99, braid_factor 0.3)
+per this milestone's own gate instruction: connected corridors with
+scattered loops, no open-room-with-pillars degenerate case — looks like a
+real maze. Done with a temporary `#[ignore]`'d test, removed before
+committing; it was never shipped code.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings (grepped, 0
+matches). `cargo test -p common maze::` — 7/7 green, including the proptest
+run (default ~256 cases).

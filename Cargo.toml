@@ -12,3 +12,5 @@ serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 proptest = "1"
 macroquad = "0.4"
+rand = "0.8"
+rand_chacha = "0.3"

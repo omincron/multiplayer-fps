@@ -5,3 +5,5 @@
 //! reads. Every item in it is a pure function of its inputs, which is what
 //! lets the whole thing be tested without a server or a window
 //! (ARCHITECTURE.md §2).
+
+pub mod maze;
