@@ -853,3 +853,24 @@ this file, both tracks rebase), and gate every merge on
 
 Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
 -p common` — 26/26 green (7 maze + 5 protocol + 5 reliability + 9 sim).
+
+2026-09-17: Fork-point infrastructure set up (see the note above). Added
+`.github/workflows/ci.yml` on `develop`: builds + tests the whole workspace
+on every push (any branch) and on PRs into `develop`/`main`, with
+`RUSTFLAGS="-D warnings"` — the CI equivalent of the manual
+"grep the build output for `warning:`" gate every milestone above was held
+to, turning any warning into a hard failure instead of a thing a human has
+to remember to check. Verified locally with
+`RUSTFLAGS="-D warnings" cargo build --workspace` and
+`... cargo test --workspace` before pushing — both clean.
+
+Cut `server-track` and `client-track` from this commit on `develop` (repo
+is `origin` = `github.com/omincron/multiplayer-fps`, both branches pushed).
+Convention going forward, per the earlier handoff discussion: `common::`
+changes land on `develop` directly (never on a track branch), get logged
+here, and whichever track didn't make the change rebases onto `develop`
+and reruns `cargo test --workspace` before continuing. Server work resumes
+at Milestone 6 on `server-track`; client work resumes at Milestone 8 on
+`client-track` (Milestone 6/7 gate the server enough that Milestone 8's
+manual "connect a real client to a real server" check has something to
+connect to, but the two tracks otherwise don't block each other).

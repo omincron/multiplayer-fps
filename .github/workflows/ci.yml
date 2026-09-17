@@ -1,0 +1,29 @@
+name: CI
+
+# Runs on every push (any branch — server-track/client-track included, not
+# just develop/main) and on PRs into develop/main, so a common:: change on
+# one track can't silently break the other before merge.
+on:
+  push:
+  pull_request:
+    branches: [develop, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Turns warnings into hard build errors — the CI equivalent of this
+  # project's manual gate ("cargo clean && cargo build --workspace, grep
+  # for `warning:`, 0 matches") that every milestone in PLAN.md has been
+  # held to since Milestone 0.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build workspace
+        run: cargo build --workspace --verbose
+      - name: Test workspace
+        run: cargo test --workspace --verbose
