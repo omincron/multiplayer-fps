@@ -764,3 +764,51 @@ suite: temporarily short-circuited `due_for_retry` to never resend
 
 Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
 -p common` — 17/17 green (7 maze + 5 protocol + 5 reliability).
+
+2026-09-17: Milestone 4 complete (`common::sim::resolve_move`,
+ARCHITECTURE.md §4.3). Circle-vs-grid collision, axis-separated (resolve X
+displacement, then Y from the possibly-X-blocked result) — this is what
+produces wall sliding "for free": a diagonal move blocked on one axis still
+applies the other, no separate sliding logic needed. Each axis moves in
+`MAX_SUBSTEP = 0.02`-unit increments, stopping at the first substep that
+would cross a wall (`circle_fits`), so it never tunnels through a wall
+regardless of how large `dt_s` is.
+
+**Design constraint worth knowing before Milestone 7/13 pick a real player
+radius**: `circle_fits` only checks the *current* cell's own wall bits, not
+a neighbouring cell's mirrored bit. That's sufficient — and cheap — only
+because `radius` is assumed well under half a cell (0.5); a radius at or
+above that could reach into a cell the check never looks at. Milestone 7's
+`server::world` should pick a radius comfortably under 0.5 (something like
+0.2–0.3) and not treat this as a general-purpose circle-vs-polygon
+collider.
+
+Tests (`common/src/sim.rs`, bottom `mod tests`): end-wall stop (within
+`EPS = 0.03`, one substep of slack), diagonal-into-corner sliding (asserts
+the *unblocked* axis actually advanced by the expected clamped-diagonal
+amount, not just "not exactly zero"), a doorway boundary test with two
+sub-cases (radius 0.49 passes straight through a 1-wide corridor, radius
+0.51 is blocked immediately — same corridor, only the radius changes),
+double-dt-doubles-displacement, and the magnitude-100 clamp test.
+
+Per this milestone's own gate instruction ("verify by temporarily breaking
+the implementation"), stubbed `resolve_move` to `return pos` unchanged and
+reran: 3 of 5 tests failed as expected, but **2 passed anyway** —
+`double_dt_doubles_displacement_in_open_space` and
+`oversized_move_dir_is_clamped_to_unit_length` only asserted a *relative*
+property (0 == 2×0, and equal-to-itself), which a no-op stub satisfies
+vacuously. Fixed both by adding an explicit "real movement happened"
+assertion (displacement > 0.1) before the relative check, reran the stub —
+all 5 failed — then reverted the stub. This is exactly the failure mode
+§8.6 warns about, worth remembering if you write a "these two calls should
+produce related outputs" test anywhere else in this project: always assert
+*a value*, not just the relationship between two values, or a stub can
+satisfy the relationship trivially.
+
+`walled_grid`/`open()` test helpers hand-build a `MazeGrid` directly rather
+than going through `maze::generate` — deliberate, so these tests have exact
+control over wall placement instead of depending on a seed producing the
+right shape.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
+-p common` — 22/22 green (7 maze + 5 protocol + 5 reliability + 5 sim).

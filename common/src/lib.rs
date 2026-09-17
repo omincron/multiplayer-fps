@@ -10,4 +10,5 @@ pub mod config;
 pub mod maze;
 pub mod protocol;
 pub mod reliability;
+pub mod sim;
 pub mod types;
