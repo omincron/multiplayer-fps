@@ -33,7 +33,9 @@ whenever convenient:
    live server), do a quick joint check: a real client actually connecting
    to a real server. That's Milestone 8's own manual gate. ~15 minutes,
    not a working session. (Status as of 2026-09-17: `server-track` has
-   completed Milestone 6; Milestone 7 is next.)
+   completed Milestone 7 — the server side of this checkpoint is ready
+   whenever `client-track` reaches the point of wanting to try a real
+   connection.)
 2. **Mandatory integration sync, before Milestone 13.** `client-track`
    should independently finish Milestones 9–12 (raycasting render,
    prediction, minimap, interpolation) against the static/self-generated
