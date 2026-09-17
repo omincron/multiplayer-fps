@@ -874,3 +874,19 @@ at Milestone 6 on `server-track`; client work resumes at Milestone 8 on
 `client-track` (Milestone 6/7 gate the server enough that Milestone 8's
 manual "connect a real client to a real server" check has something to
 connect to, but the two tracks otherwise don't block each other).
+
+2026-09-17: `common::config::Config` added (§9.1) — on `develop` directly,
+per the fork-point convention above, since Milestone 6 (`server-track`)
+needs it but it's a `common` change. `bind_addr`, `tick_hz`, `max_players`,
+`client_timeout_ms`, `retry_interval_ms`, `max_retry_attempts`; `Default`
+built from the existing §9 constants plus a new `DEFAULT_PORT = 7777`
+(arbitrary choice, not in the architecture doc's constant table — tests
+never reference it, they always override `bind_addr` to `127.0.0.1:0`).
+One test: `Default` actually matches every constant it's supposed to be
+built from, and binds `0.0.0.0` (not loopback) by default. `server-track`
+should rebase onto this commit before continuing Milestone 6; `client-track`
+doesn't need it yet but was fast-forwarded too since it hadn't diverged.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
+-p common` — 27/27 green (7 maze + 5 protocol + 5 reliability + 9 sim + 1
+config).

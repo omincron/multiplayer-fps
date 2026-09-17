@@ -3,11 +3,17 @@
 //! hardcoded duplicate is exactly the kind of drift a "single source of
 //! truth" is supposed to prevent.
 //!
-//! The runtime-configurable `Config` struct (§9.1) belongs to Milestone 6,
-//! once the server exists to read it. These plain consts are needed much
-//! earlier — Milestone 2's payload-budget tests reference `MAX_PAYLOAD_BYTES`
-//! and `MAX_PLAYERS` — so they're their own module now rather than bundled
-//! with a struct that doesn't exist yet.
+//! The runtime-configurable `Config` struct (§9.1) is below, added at
+//! Milestone 6 now that the server exists to read it. Several of the
+//! plain consts above it can't be `pub const` at the point of use, because
+//! server integration tests need to lower them: an idle-timeout test that
+//! waits a real 5 seconds is too slow, a capacity test needs to open more
+//! sockets than a low `max_players` would allow, and the bind address is
+//! `0.0.0.0:PORT` in production but `127.0.0.1:0` under test. A `const`
+//! can't be overridden per test, so those live in `Config`, and the
+//! server reads the struct — never the constant — at every use site.
+
+use std::net::SocketAddr;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Bump on ANY change to maze generation output (`common::maze::generate`).
@@ -35,3 +41,58 @@ pub const FPS_AVG_WINDOW_FRAMES: usize = 60;
 /// Recv buffer size AND the deserializer's read limit — every wire
 /// message must fit under this to avoid UDP fragmentation (§3.2).
 pub const MAX_PAYLOAD_BYTES: usize = 1200;
+
+/// Production UDP port. Not part of the ARCHITECTURE.md §9 constant table
+/// (that section only names the field, "0.0.0.0:PORT") — picked here as
+/// the concrete default so `Config::default()` is a complete, runnable
+/// value. Tests always override `bind_addr` to `127.0.0.1:0` and never
+/// reference this.
+pub const DEFAULT_PORT: u16 = 7777;
+
+/// Runtime-configurable server settings (§9.1). `Default` is built from
+/// the constants above; every server use site reads a `Config` value —
+/// never a bare constant — precisely so a test can shrink `max_players`,
+/// shorten `client_timeout_ms`, or bind to an OS-assigned loopback port
+/// without touching production behavior.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// `0.0.0.0:PORT` in production (accepts non-loopback source IPs,
+    /// per the audit's "connect from another computer" requirement);
+    /// `127.0.0.1:0` (OS-assigned port) in tests.
+    pub bind_addr: SocketAddr,
+    pub tick_hz: u16,
+    pub max_players: usize,
+    pub client_timeout_ms: u64,
+    pub retry_interval_ms: u64,
+    pub max_retry_attempts: u32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            bind_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
+            tick_hz: SERVER_TICK_HZ,
+            max_players: MAX_PLAYERS,
+            client_timeout_ms: CLIENT_TIMEOUT_MS,
+            retry_interval_ms: RETRY_INTERVAL_MS,
+            max_retry_attempts: MAX_RETRY_ATTEMPTS,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_matches_the_constants_it_is_built_from() {
+        let config = Config::default();
+        assert_eq!(config.bind_addr.port(), DEFAULT_PORT);
+        assert!(config.bind_addr.ip().is_unspecified(), "production default must bind 0.0.0.0, not loopback");
+        assert_eq!(config.tick_hz, SERVER_TICK_HZ);
+        assert_eq!(config.max_players, MAX_PLAYERS);
+        assert_eq!(config.client_timeout_ms, CLIENT_TIMEOUT_MS);
+        assert_eq!(config.retry_interval_ms, RETRY_INTERVAL_MS);
+        assert_eq!(config.max_retry_attempts, MAX_RETRY_ATTEMPTS);
+    }
+}
