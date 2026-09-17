@@ -812,3 +812,44 @@ right shape.
 
 Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
 -p common` — 22/22 green (7 maze + 5 protocol + 5 reliability + 5 sim).
+
+2026-09-17: Milestone 5 complete (`common::sim::raycast_hit`,
+ARCHITECTURE.md §4.3). Standard DDA grid raycast (`raycast_wall_distance`)
+for the nearest wall crossing, plus analytic ray-circle intersection
+(`ray_circle_distance`) per candidate player; `raycast_hit` takes the
+smaller of the two, so "first collision wins" falls out of a plain
+distance comparison rather than needing separate occlusion logic. `players`
+is the *candidate* list — the caller (future `server::world`) is
+responsible for excluding the shooter before calling this; the function
+itself has no concept of "self."
+
+Tests (`common/src/sim.rs`, appended to the same `mod tests`): a 10-cell
+corridor helper (`corridor(blocked_after)`) reused across all four cases —
+wall-only hit at the exact expected distance, player-closer-than-wall
+(distance computed by hand: near edge of a radius-0.3 circle at x=5.0,
+`(5.0-0.3)-0.5 = 4.2`), wall-closer-than-player (a player sits beyond a
+mid-corridor wall and must never be reported), and a clean miss when
+`max_range` is shorter than the corridor. All four passed against the
+first implementation — no distance math needed correcting.
+
+Per the gate's "spot-check at least one by breaking it on purpose"
+instruction, removed the occlusion guard (`if dist >= wall_distance {
+continue }`) and reran just the wall-closer-than-player test: it failed,
+reporting the occluded player as hit at distance 6.2 instead of the wall
+at 3.5 — confirming that test doesn't pass by accident. Reverted before
+committing.
+
+This completes `common` (Milestones 1–5): maze generation, wire protocol,
+reliability layer, movement/collision, and shooting are all built and
+tested. Per the fork-point discussion earlier in this project's history —
+`common`'s public contract (types, constants, `resolve_move`,
+`raycast_hit`, `generate`) is now the frozen interface both `server` and
+`client` build against. This is the intended split point for two
+devs/agents to work `server` (Milestones 6–7, 13–14) and `client`
+(Milestones 8–13) in parallel: branch `server-track`/`client-track` off
+`develop` from here, keep `common` changes on `develop` directly (logged in
+this file, both tracks rebase), and gate every merge on
+`cargo test --workspace` staying green.
+
+Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
+-p common` — 26/26 green (7 maze + 5 protocol + 5 reliability + 9 sim).
