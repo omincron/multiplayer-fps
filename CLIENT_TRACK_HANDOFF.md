@@ -21,6 +21,40 @@ the `common` crate: maze generation, wire protocol, reliability layer,
 movement/collision, shooting — are done, gated (zero warnings, all tests
 green), and frozen as the contract both tracks build against.
 
+## Rendezvous points
+
+Three planned sync-ups with `server-track`, not a free-for-all merge
+whenever convenient:
+
+1. **Lightweight checkpoint, soon.** Once `server-track` finishes
+   Milestone 7 (tick loop + movement, including the load test) and
+   `client-track` finishes the automatable parts of Milestone 8 (CLI
+   prompts, handshake retry logic, fps averaging — none of which need a
+   live server), do a quick joint check: a real client actually connecting
+   to a real server. That's Milestone 8's own manual gate. ~15 minutes,
+   not a working session. (Status as of 2026-09-17: `server-track` has
+   completed Milestone 6; Milestone 7 is next.)
+2. **Mandatory integration sync, before Milestone 13.** `client-track`
+   should independently finish Milestones 9–12 (raycasting render,
+   prediction, minimap, interpolation) against the static/self-generated
+   maze and fake data first — none of that needs the server further along.
+   Milestones 13 (shooting/health/respawn/kill-feed) and 14 (level
+   progression) are genuinely joint: server wires `raycast_hit` and the
+   level table, client wires the HUD reaction and `LevelChanged` handling,
+   and neither side can finish either milestone alone. Treat 13+14 as one
+   combined integration session.
+3. **Final rendezvous, everyone.** Milestone 15, the pre-submission
+   load/soak dress rehearsal (10+ clients, 3 minutes, fps logged). Needs a
+   fully working client and server together regardless of how the earlier
+   work split up.
+
+So: `server-track` completes through Milestone 7, `client-track` completes
+through Milestone 12, before the mandatory Milestone 13/14 sync — that's
+the one to actually plan a joint session around. After Milestone 15,
+bonus features (Milestone 16+) can split again (bots → server, editor/
+launcher → client, procedural levels already covered by 14) with only a
+final joint smoke-test before submission.
+
 ## The one hard rule
 
 Don't modify anything under `common/` from `client-track`. If a Milestone
@@ -37,21 +71,6 @@ Every push (any branch) and every PR into `develop`/`main` runs
 `cargo build --workspace` + `cargo test --workspace` with
 `RUSTFLAGS="-D warnings"` — a warning now fails the build outright, not
 just a manual grep.
-
-## Two things that aren't cleanly separable
-
-- **Milestone 13** ("shooting, health, respawn, kill feed end-to-end") is
-  joint: it needs server-side `raycast_hit` wiring *and* client-side HUD
-  reaction together. Same for the level-progression parts of
-  **Milestone 14** (`LevelChanged` handling). These two milestones need a
-  short sync between tracks rather than being purely independent.
-- Milestone 8's own manual gate ("connect a real client to a real server")
-  needs `server-track` to have reached Milestone 7 first. The automated
-  parts of Milestone 8 — CLI prompt logic, fps-averaging unit test,
-  connect-handshake test against a scripted fake responder — don't need a
-  real server at all, so `client-track` can build and gate most of
-  Milestone 8 without waiting. Only the final manual check is blocked on
-  server progress.
 
 ## Naming gotcha
 
