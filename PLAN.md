@@ -1528,3 +1528,66 @@ temporary shortened duration for the demo — neither was done as part of
 this entry. A basic smoke test (real server + real client, ~10 seconds,
 process-alive/log-only) passed with the new code active, but that's
 stability, not the visual gate.
+
+2026-09-21: Milestone 15 complete (load/soak validation, ARCHITECTURE.md
+§8.5), on `develop` directly.
+
+**New `xtask` crate** (ARCHITECTURE.md §2's originally-optional layout
+entry — now built, doc updated to drop the "(optional)"): a standalone
+bot-client binary, `cargo run -p xtask -- <server_addr> <bot_count>
+[duration_secs]`. Deliberately real UDP clients performing the real
+Milestone 8 join handshake (reimplemented locally rather than depending on
+the `client` crate, since a load-generating bot has no business pulling in
+`macroquad`/rendering), then sending continuous randomized movement (a new
+random direction/facing every 1-3s) plus an occasional shot (5% chance per
+input) — indistinguishable from a real player at the protocol level, which
+is the point: it exercises the exact same server code path a human does,
+not a separate short-circuited "test mode". Deliberately NOT the
+`server::bots` AI-bot bonus feature from §7.2 (pathfinding, holding a real
+player slot server-side) — this is only a load generator, run as external
+processes. A bot never reads from its socket after the handshake (it has
+no use for `WorldState`/`Event` traffic), so unacked events to it
+eventually give up per §3.3 — confirmed via smoke test this is expected
+log noise (`server: gave up delivering event N to player M`), not a bug.
+
+**Automated soak test** (`server/tests/tick_loop.rs`,
+`tick_rate_and_connections_hold_over_a_full_three_minute_soak`): the same
+shape as Milestone 7's existing 10-second/10-client CI test, extended to
+this milestone's actual "10+ clients, 3 minutes" ask, with 12 clients and
+now also tracking any `PlayerLeft` received during the run (a real
+regression, not noise, since every client sends input every 20ms — well
+under the 5000ms test timeout). Marked `#[ignore]`: a 3-minute test on
+every `cargo test` would slow routine iteration for no benefit the
+existing 10-second version doesn't already provide in CI. Run explicitly
+via `cargo test -p server --test tick_loop -- --ignored --nocapture`.
+Refactored both tests' logging through one shared `append_log_line` helper
+(previously duplicated inline) since there are now two things to log, not
+one.
+
+**Evidence, actually run, not just written** (this milestone's own gate
+instruction — "logged evidence file... not a one-time terminal glance"):
+```
+clients=12 target_hz=30 achieved_hz=30.34 ticks=5453 secs=179.76
+dropped_connections=0 ids=[]
+```
+12 clients, full 179.76s run, tick rate held at 30.34Hz against a 30Hz
+target (well inside the existing 0.8x tolerance), zero dropped/timed-out
+connections. Persisted in `target/tick_rate_log.txt` (gitignored, local)
+alongside Milestone 7's own 10-second-run entries.
+
+`cargo test --workspace` (routine, non-`--ignored` run): 85/85 green,
+unchanged from Milestone 14 — the new soak test doesn't run by default.
+`cargo clean && cargo build --workspace` — zero warnings under
+`RUSTFLAGS="-D warnings"`, now including `xtask`.
+
+**Not yet done — the manual half**: PLAN.md's own Milestone 15 manual
+gate ("run a real client alongside 9+ bots... for 3+ minutes, watch the
+client's own fps counter stay above 50 throughout, and separately judge
+'does it feel smooth' as its own explicit check") still needs a human
+watching a real client window for the full duration — not run as part of
+this entry. Worth doing as one combined session with Milestone 14's own
+still-open manual gate (a live level transition, visually confirmed):
+at the real `LEVEL_DURATION_MS` (90s), a single 3+ minute soak session
+with a real client running alongside `xtask` bots will naturally cross
+at least one, likely two, level transitions during the same watch — no
+need to separately shorten the duration for a quick demo.

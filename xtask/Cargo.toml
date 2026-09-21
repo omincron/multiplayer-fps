@@ -1,0 +1,12 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+
+# Milestone 15 (ARCHITECTURE.md §2, §8.5): a standalone bot-client binary
+# for the pre-submission load/soak dress rehearsal. Deliberately depends
+# only on `common` — it's real UDP clients, not a test harness, so it
+# can't reuse `server/tests/support`'s `FakeClient`.
+[dependencies]
+common.workspace = true
+rand.workspace = true

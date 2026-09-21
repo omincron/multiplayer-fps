@@ -79,7 +79,7 @@ maze_wars/
 │   │   ├── editor.rs          # maze editor (bonus)
 │   │   └── launcher.rs        # GUI host-history launcher (bonus)
 │   └── tests/
-└── xtask/ (optional)          # helper binary: spawns N bot clients for load testing
+└── xtask/                     # helper binary: spawns N bot clients for load testing (built at Milestone 15)
 ```
 
 **Rule:** `common` has zero dependencies on networking sockets, rendering, or

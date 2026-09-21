@@ -272,15 +272,114 @@ fn tick_rate_holds_under_load_with_ten_clients() {
     );
 }
 
+/// Milestone 15's automated half of the pre-submission dress rehearsal
+/// (ARCHITECTURE.md §8.5): the same load test above, extended to the full
+/// "10+ clients, 3 minutes" this milestone asks for, additionally logging
+/// any dropped/timed-out connection to the same evidence file. `#[ignore]`
+/// deliberately — a 3-minute test on every `cargo test` would make routine
+/// iteration painfully slow for no benefit the 10-second version above
+/// doesn't already provide (that one already catches a real regression,
+/// e.g. an O(n^2) broadcast or lock contention, in CI on every push). Run
+/// explicitly before submission:
+/// `cargo test -p server --test tick_loop -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn tick_rate_and_connections_hold_over_a_full_three_minute_soak() {
+    let n_clients = 12; // "10+" per PLAN.md's own wording, with headroom
+    let addr = spawn_server_with_maze(test_config(n_clients, 5000), open_room(30, 30));
+
+    let mut clients = Vec::new();
+    for i in 0..n_clients {
+        let c = FakeClient::connect_with_timeout(addr, Duration::from_millis(50));
+        let ServerMsg::Welcome { .. } = c.join(&format!("soakbot{i}")) else {
+            panic!("expected Welcome for soakbot{i}")
+        };
+        clients.push(c);
+    }
+
+    let test_duration = Duration::from_secs(180);
+    let start = Instant::now();
+    let mut input_tick = 0u32;
+    let observer = &clients[0];
+    let mut first_tick: Option<(u32, Instant)> = None;
+    let mut last_tick: Option<(u32, Instant)> = None;
+    let mut dropped_connections: Vec<common::types::PlayerId> = Vec::new();
+
+    while start.elapsed() < test_duration {
+        input_tick += 1;
+        for c in &clients {
+            c.send(&input(input_tick, Vec2::new(1.0, 0.0)));
+        }
+        match observer.try_recv() {
+            Some(ServerMsg::WorldState { tick, .. }) => {
+                let now = Instant::now();
+                if first_tick.is_none() {
+                    first_tick = Some((tick, now));
+                }
+                last_tick = Some((tick, now));
+            }
+            // Every client sends input every 20ms of this loop, well
+            // under `client_timeout_ms` (5000ms) — a `PlayerLeft` for any
+            // of them during this run is a real regression, not noise.
+            Some(ServerMsg::Event {
+                kind: common::protocol::EventKind::PlayerLeft { id },
+                ..
+            }) => {
+                dropped_connections.push(id);
+            }
+            _ => {}
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (t0, i0) = first_tick.expect("never received any WorldState during the soak test");
+    let (t1, i1) = last_tick.unwrap();
+    let elapsed_s = (i1 - i0).as_secs_f64();
+    let ticks_elapsed = (t1 - t0) as f64;
+    let achieved_hz = if elapsed_s > 0.0 {
+        ticks_elapsed / elapsed_s
+    } else {
+        0.0
+    };
+    let target_hz = SERVER_TICK_HZ as f64;
+
+    log_tick_rate_result(n_clients, target_hz, achieved_hz, ticks_elapsed as u32, elapsed_s);
+    log_dropped_connections(&dropped_connections);
+
+    assert!(
+        achieved_hz > target_hz * 0.8,
+        "achieved tick rate {achieved_hz:.2}Hz is too far below target {target_hz}Hz over the \
+         full 3-minute soak with {n_clients} clients"
+    );
+    assert!(
+        dropped_connections.is_empty(),
+        "expected zero dropped/timed-out connections over the full soak (every client sent \
+         input continuously); got {dropped_connections:?}"
+    );
+}
+
 /// Persists the load-test result so it's not a one-time terminal glance
 /// (PLAN.md Milestone 7 gate's own instruction) — appended to a log file
 /// under the workspace's `target/` (gitignored, but present locally across
 /// runs) in addition to the usual captured test output.
 fn log_tick_rate_result(n_clients: usize, target_hz: f64, achieved_hz: f64, ticks: u32, secs: f64) {
-    let line = format!(
+    append_log_line(&format!(
         "{} clients={n_clients} target_hz={target_hz} achieved_hz={achieved_hz:.2} ticks={ticks} secs={secs:.2}\n",
         chrono_like_timestamp(),
-    );
+    ));
+}
+
+/// Milestone 15's own logging requirement: "any dropped/timed-out
+/// connections" alongside the tick rate, in the same evidence file.
+fn log_dropped_connections(dropped: &[common::types::PlayerId]) {
+    append_log_line(&format!(
+        "{} dropped_connections={} ids={dropped:?}\n",
+        chrono_like_timestamp(),
+        dropped.len(),
+    ));
+}
+
+fn append_log_line(line: &str) {
     eprint!("{line}"); // visible in CI's captured-on-failure output too
 
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
