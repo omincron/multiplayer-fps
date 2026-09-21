@@ -1,4 +1,5 @@
 use client::fps::FpsMeter;
+use client::interp::{ClockSync, tick_to_server_time_ms};
 use client::maze::build_and_validate;
 use client::net::{Connection, connect, send_message, spawn_receiver};
 use client::players::RemotePlayers;
@@ -6,10 +7,12 @@ use client::predict::Predictor;
 use client::prompts::{prompt_name, prompt_server_address};
 use client::render::minimap::{MinimapRect, draw_minimap};
 use client::render::raycast::{WallSide, cast_view};
+use common::config::INTERP_DELAY_MS;
 use common::maze::MazeData;
 use common::protocol::{ClientMsg, ServerMsg};
 use common::types::Vec2;
 use macroquad::prelude::*;
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::mpsc::Receiver;
 
@@ -66,13 +69,38 @@ async fn run_window(
     let mut camera_correction = Vec2::ZERO;
     let mut camera_angle = 0.0_f32;
     let mut remote_players = RemotePlayers::default();
+    let initial_local_time_ms = get_time() * 1000.0;
+    let mut clock = ClockSync::default();
+    clock.observe_pong(
+        initial_local_time_ms,
+        initial_local_time_ms,
+        connection.welcome.server_time_ms as f64,
+    );
+    let mut clock_anchor = (
+        connection.welcome.server_tick,
+        connection.welcome.server_time_ms,
+    );
+    let mut pending_pings: HashMap<u32, f64> = HashMap::new();
+    let mut next_ping_nonce = 1_u32;
+    let mut next_ping_at_ms = initial_local_time_ms + 1000.0;
     let mut network_error: Option<String> = None;
     const FIELD_OF_VIEW: f32 = std::f32::consts::FRAC_PI_3;
     const TURN_SPEED: f32 = 1.8;
 
     loop {
         let frame_time = get_frame_time();
+        let local_now_ms = get_time() * 1000.0;
         fps_meter.record_frame(frame_time);
+        if local_now_ms >= next_ping_at_ms {
+            let nonce = next_ping_nonce;
+            next_ping_nonce = next_ping_nonce.wrapping_add(1);
+            if let Err(error) = send_message(&connection.socket, &ClientMsg::Ping { nonce }) {
+                network_error = Some(error.to_string());
+            } else {
+                pending_pings.insert(nonce, local_now_ms);
+            }
+            next_ping_at_ms = local_now_ms + 1000.0;
+        }
         if is_key_down(KeyCode::Left) || is_key_down(KeyCode::A) {
             camera_angle -= TURN_SPEED * frame_time;
         }
@@ -99,12 +127,18 @@ async fn run_window(
         while let Ok(message) = incoming.try_recv() {
             match message {
                 ServerMsg::WorldState {
+                    tick,
                     level_epoch,
                     players,
-                    ..
                 } if level_epoch == connection.welcome.level_epoch => {
-                    let now_ms = (get_time() * 1000.0) as u64;
-                    remote_players.apply_snapshot(connection.welcome.player_id, &players, now_ms);
+                    let snapshot_server_time_ms =
+                        tick_to_server_time_ms(tick, clock_anchor.0, clock_anchor.1);
+                    remote_players.apply_snapshot(
+                        connection.welcome.player_id,
+                        &players,
+                        snapshot_server_time_ms,
+                        local_now_ms as u64,
+                    );
                     if let Some(player) = players
                         .iter()
                         .find(|player| player.id == connection.welcome.player_id)
@@ -123,10 +157,19 @@ async fn run_window(
                         network_error = Some(error.to_string());
                     }
                 }
+                ServerMsg::Pong {
+                    nonce,
+                    server_tick,
+                    server_time_ms,
+                } => {
+                    if let Some(sent_at_ms) = pending_pings.remove(&nonce) {
+                        clock.observe_pong(sent_at_ms, local_now_ms, server_time_ms as f64);
+                        clock_anchor = (server_tick, server_time_ms);
+                    }
+                }
                 ServerMsg::Welcome { .. }
                 | ServerMsg::Rejected { .. }
-                | ServerMsg::WorldState { .. }
-                | ServerMsg::Pong { .. } => {}
+                | ServerMsg::WorldState { .. } => {}
             }
         }
 
@@ -146,7 +189,14 @@ async fn run_window(
             x: screen_width() - maze.grid.width as f32 * minimap_scale - 20.0,
             y: 20.0,
         };
-        let remote_positions: Vec<Vec2> = remote_players.iter().map(|player| player.pos).collect();
+        let target_server_time_ms = clock
+            .server_time_ms(local_now_ms)
+            .unwrap_or(connection.welcome.server_time_ms as f64)
+            - INTERP_DELAY_MS as f64;
+        let remote_positions: Vec<Vec2> = remote_players
+            .iter()
+            .map(|player| player.render_state(target_server_time_ms).0)
+            .collect();
         draw_minimap(
             &maze.grid,
             predicted,

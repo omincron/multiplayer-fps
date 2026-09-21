@@ -1026,7 +1026,41 @@ membership paths were written red before implementation. `cargo test
 `rustfmt --check`, client Clippy with warnings denied, `RUSTFLAGS='-D warnings'
 cargo build --workspace`, and `git diff --check` pass.
 
-Remaining Milestone 11 gate: run two real clients together. Each must show the
-other as a red minimap marker, and moving either client must update its marker
-on both minimaps. Do not mark Milestone 11 complete until that audit-equivalent
-two-client check passes.
+2026-09-21: Milestone 11 complete. The team ran the two-client audit check and
+confirmed each client shows itself and the other player on the minimap, remote
+markers update as either player moves, and disconnected players disappear.
+
+2026-09-21: Milestone 12 automated portion complete on `client-track`. Added a
+bounded, time-sorted `SnapshotBuffer` per remote player. It interpolates
+position and shortest-arc facing between bracketing snapshots, extrapolates
+velocity only through `MAX_EXTRAPOLATION_MS`, then holds the latest known state
+instead of guessing indefinitely. The buffer retains `SNAPSHOT_BUFFER_LEN`
+(5) entries, which tests prove brackets the 100 ms delayed render target at the
+30 Hz server rate.
+
+Added `ClockSync` driven by one-second `Ping`/matching `Pong` samples. Offset is
+selected from the recent sample with the lowest RTT so a badly delayed Pong
+cannot drag the render timeline away from buffered snapshots. `Welcome`
+provides the initial zero-RTT clock anchor before the first Pong. Snapshot ticks
+are converted relative to the latest `(server_tick, server_time_ms)` anchor;
+time arithmetic uses `f64` because epoch-sized millisecond values lose usable
+precision in `f32`.
+
+Remote minimap markers now render at estimated server time minus
+`INTERP_DELAY_MS`, rather than at their latest raw 30 Hz snapshot. Snapshot
+insertion tolerates UDP reordering. A red test for a snapshot tick slightly
+older than the newest Pong anchor exposed unsigned wraparound (billions of
+ticks into the future); the conversion now interprets the wrapping delta as
+signed, and both forward and backward anchor cases pass.
+
+TDD evidence covers interpolation, bounded extrapolation then hold, configured
+buffer length taking the interpolation branch, shortest-path angle wrapping,
+clock outlier rejection, and tick-to-server-time anchoring. `cargo test
+--workspace` passes 60 tests total (33 client + 27 common). Client-only
+`rustfmt --check`, client Clippy with warnings denied, `RUSTFLAGS='-D warnings'
+cargo build --workspace`, and `git diff --check` pass.
+
+Remaining Milestone 12 gates: with two real clients, confirm the moving remote
+marker is smooth rather than stepping at 30 Hz; then artificially delay one
+client's receive path and confirm motion degrades reasonably without violent
+jumps. Do not mark Milestone 12 complete until both visual checks pass.

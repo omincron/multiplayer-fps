@@ -3,7 +3,9 @@ use common::protocol::{EventKind, PlayerSnapshot};
 use common::types::{PlayerId, Vec2};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq)]
+use crate::interp::{SnapshotBuffer, TimedSnapshot};
+
+#[derive(Debug)]
 pub struct RemotePlayer {
     pub id: PlayerId,
     pub name: String,
@@ -11,6 +13,16 @@ pub struct RemotePlayer {
     pub facing: f32,
     pub hp: u8,
     last_seen_ms: u64,
+    snapshots: SnapshotBuffer,
+}
+
+impl RemotePlayer {
+    pub fn render_state(&self, target_server_time_ms: f64) -> (Vec2, f32) {
+        self.snapshots
+            .sample(target_server_time_ms)
+            .map(|sample| (sample.pos, sample.facing))
+            .unwrap_or((self.pos, self.facing))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -20,7 +32,13 @@ pub struct RemotePlayers {
 }
 
 impl RemotePlayers {
-    pub fn apply_snapshot(&mut self, self_id: PlayerId, snapshots: &[PlayerSnapshot], now_ms: u64) {
+    pub fn apply_snapshot(
+        &mut self,
+        self_id: PlayerId,
+        snapshots: &[PlayerSnapshot],
+        snapshot_server_time_ms: f64,
+        now_ms: u64,
+    ) {
         for snapshot in snapshots.iter().filter(|player| player.id != self_id) {
             let fallback_name = || format!("Player {}", snapshot.id);
             let name = self
@@ -28,18 +46,27 @@ impl RemotePlayers {
                 .get(&snapshot.id)
                 .cloned()
                 .unwrap_or_else(fallback_name);
-            let player = self.players.entry(snapshot.id).or_insert(RemotePlayer {
-                id: snapshot.id,
-                name,
-                pos: snapshot.pos,
-                facing: snapshot.facing,
-                hp: snapshot.hp,
-                last_seen_ms: now_ms,
-            });
+            let player = self
+                .players
+                .entry(snapshot.id)
+                .or_insert_with(|| RemotePlayer {
+                    id: snapshot.id,
+                    name,
+                    pos: snapshot.pos,
+                    facing: snapshot.facing,
+                    hp: snapshot.hp,
+                    last_seen_ms: now_ms,
+                    snapshots: SnapshotBuffer::default(),
+                });
             player.pos = snapshot.pos;
             player.facing = snapshot.facing;
             player.hp = snapshot.hp;
             player.last_seen_ms = now_ms;
+            player.snapshots.push(TimedSnapshot {
+                server_time_ms: snapshot_server_time_ms,
+                pos: snapshot.pos,
+                facing: snapshot.facing,
+            });
         }
 
         self.players
@@ -94,7 +121,7 @@ mod tests {
     #[test]
     fn unknown_snapshot_player_is_created_with_placeholder_name() {
         let mut players = RemotePlayers::default();
-        players.apply_snapshot(1, &[snapshot(1, 1.0), snapshot(9, 3.0)], 100);
+        players.apply_snapshot(1, &[snapshot(1, 1.0), snapshot(9, 3.0)], 100.0, 100);
 
         let remote = players.get(9).unwrap();
         assert_eq!(remote.name, "Player 9");
@@ -105,7 +132,7 @@ mod tests {
     #[test]
     fn late_join_event_replaces_placeholder_name() {
         let mut players = RemotePlayers::default();
-        players.apply_snapshot(1, &[snapshot(9, 3.0)], 100);
+        players.apply_snapshot(1, &[snapshot(9, 3.0)], 100.0, 100);
 
         players.apply_event(&EventKind::PlayerJoined {
             id: 9,
@@ -118,11 +145,11 @@ mod tests {
     #[test]
     fn absent_player_is_removed_after_ghost_timeout_without_leave_event() {
         let mut players = RemotePlayers::default();
-        players.apply_snapshot(1, &[snapshot(9, 3.0)], 100);
+        players.apply_snapshot(1, &[snapshot(9, 3.0)], 100.0, 100);
 
-        players.apply_snapshot(1, &[], 100 + GHOST_TIMEOUT_MS);
+        players.apply_snapshot(1, &[], 200.0, 100 + GHOST_TIMEOUT_MS);
         assert!(players.get(9).is_some());
-        players.apply_snapshot(1, &[], 101 + GHOST_TIMEOUT_MS);
+        players.apply_snapshot(1, &[], 300.0, 101 + GHOST_TIMEOUT_MS);
         assert!(players.get(9).is_none());
     }
 }
