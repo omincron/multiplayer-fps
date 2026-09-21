@@ -1591,3 +1591,31 @@ at the real `LEVEL_DURATION_MS` (90s), a single 3+ minute soak session
 with a real client running alongside `xtask` bots will naturally cross
 at least one, likely two, level transitions during the same watch — no
 need to separately shorten the duration for a quick demo.
+
+2026-09-21: The combined manual session ran: real server + 9 `xtask`
+bots + one real human client, played for 3+ minutes. Result:
+- **Milestone 15's manual gate**: fps stayed above 50 throughout;
+  movement judged smooth as its own explicit check, not inferred from the
+  fps number alone. Milestone 15 is fully closed.
+- **Milestone 14's manual gate**: a live level transition was observed —
+  maze regenerated into a harder layout, player was not left stuck in old
+  geometry. Milestone 14 is fully closed.
+
+One real coordination bug hit and fixed along the way, worth remembering
+for next time: the first bot run was started with a fixed `duration_secs`
+(220s) *before* the human had actually connected their own client — by
+the time they got in and looked, several minutes of conversation/setup
+time had elapsed, the bots had already finished their run and sent
+`Leave`, and the minimap correctly showed nobody else (not a bug in the
+minimap or `RemotePlayers`, just bots that were already gone). Fixed by
+relaunching `xtask` with no `duration_secs` (runs until killed) instead
+of guessing a fixed window — when a human's own pacing is in the loop,
+prefer "runs until stopped" over a timed background job.
+
+Core game (Milestones 0–15) is now fully complete and gated: maze
+generation, protocol, reliability, movement, shooting, server tick loop,
+client rendering/prediction/interpolation, shooting/health/respawn/kill
+feed, level progression, and load/soak validation are all built, tested,
+and manually verified end to end. Remaining work is Milestone 16+ bonus
+features only (§7: AI bots as a real feature, maze editor, host-history
+launcher — procedural levels already satisfied by Milestone 14).
