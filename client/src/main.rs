@@ -8,7 +8,8 @@ use client::players::RemotePlayers;
 use client::predict::Predictor;
 use client::prompts::{prompt_name, prompt_server_address};
 use client::render::minimap::{MinimapRect, draw_minimap};
-use client::render::raycast::{WallSide, cast_view};
+use client::render::raycast::{ViewColumn, WallSide, cast_view};
+use client::render::sprites::{is_occluded, project_sprite, sprite_column_range};
 use common::config::{INTERP_DELAY_MS, MAX_HP};
 use common::maze::MazeData;
 use common::protocol::{ClientMsg, EventKind, ServerMsg};
@@ -272,7 +273,21 @@ async fn run_window(
             predicted.y + camera_correction.y,
         );
         let maze = level_state.maze();
-        draw_maze_view(maze, camera_position, camera_angle, FIELD_OF_VIEW);
+        let target_server_time_ms = clock
+            .server_time_ms(local_now_ms)
+            .unwrap_or(connection.welcome.server_time_ms as f64)
+            - INTERP_DELAY_MS as f64;
+        let (columns, projection_plane) =
+            draw_maze_view(maze, camera_position, camera_angle, FIELD_OF_VIEW);
+        draw_player_sprites(
+            &columns,
+            projection_plane,
+            camera_position,
+            camera_angle,
+            FIELD_OF_VIEW,
+            &remote_players,
+            target_server_time_ms,
+        );
         let minimap_scale = 220.0 / (maze.grid.width.max(maze.grid.height) as f32);
         let minimap = MinimapRect {
             width: maze.grid.width as f32 * minimap_scale,
@@ -280,10 +295,6 @@ async fn run_window(
             x: screen_width() - maze.grid.width as f32 * minimap_scale - 20.0,
             y: 20.0,
         };
-        let target_server_time_ms = clock
-            .server_time_ms(local_now_ms)
-            .unwrap_or(connection.welcome.server_time_ms as f64)
-            - INTERP_DELAY_MS as f64;
         let remote_positions: Vec<Vec2> = remote_players
             .iter()
             .map(|player| player.render_state(target_server_time_ms).0)
@@ -353,7 +364,16 @@ fn player_label(id: PlayerId, self_id: PlayerId, self_name: &str, remote_players
     }
 }
 
-fn draw_maze_view(maze: &MazeData, camera: Vec2, facing: f32, field_of_view: f32) {
+/// Draws the walls and returns the per-column wall data plus the
+/// projection plane used to compute it, so `draw_player_sprites` can reuse
+/// both (ARCHITECTURE.md §6.5: sprites reuse "the same depth buffer" the
+/// wall renderer already built, rather than re-raycasting from scratch).
+fn draw_maze_view(
+    maze: &MazeData,
+    camera: Vec2,
+    facing: f32,
+    field_of_view: f32,
+) -> (Vec<Option<ViewColumn>>, f32) {
     let width = screen_width();
     let height = screen_height();
     draw_rectangle(
@@ -371,20 +391,18 @@ fn draw_maze_view(maze: &MazeData, camera: Vec2, facing: f32, field_of_view: f32
         Color::from_rgba(22, 25, 29, 255),
     );
 
-    let columns = width.ceil().max(1.0) as usize;
+    let columns_count = width.ceil().max(1.0) as usize;
     let max_distance = (maze.grid.width as f32).hypot(maze.grid.height as f32) + 1.0;
     let projection_plane = (width * 0.5) / (field_of_view * 0.5).tan();
-    for (column, hit) in cast_view(
+    let columns = cast_view(
         &maze.grid,
         camera,
         facing,
         field_of_view,
-        columns,
+        columns_count,
         max_distance,
-    )
-    .into_iter()
-    .enumerate()
-    {
+    );
+    for (column, hit) in columns.iter().enumerate() {
         let Some(hit) = hit else { continue };
         let depth = hit.depth.max(0.0001);
         let wall_height = (projection_plane / depth).min(height * 3.0);
@@ -407,5 +425,58 @@ fn draw_maze_view(maze: &MazeData, camera: Vec2, facing: f32, field_of_view: f32
             wall_height,
             color,
         );
+    }
+    (columns, projection_plane)
+}
+
+/// Ratio of a sprite's own full-cell-scale `screen_height` used as its
+/// actual displayed height/width (ARCHITECTURE.md §6.5: "simple flat
+/// polygon/wireframe billboards" — a person doesn't fill floor-to-ceiling
+/// the way a wall strip's height formula implies, so these ratios bring
+/// it down to a human-ish silhouette instead of a wall-sized one).
+const SPRITE_HEIGHT_RATIO: f32 = 0.6;
+const SPRITE_WIDTH_RATIO: f32 = 0.35;
+
+/// Draws every remote player as a vertical-strip billboard, occluded
+/// per-column by the wall depth `draw_maze_view` already computed —
+/// exactly the technique ARCHITECTURE.md §6.5 describes, and the reason
+/// this function takes `columns` instead of raycasting again.
+fn draw_player_sprites(
+    columns: &[Option<ViewColumn>],
+    projection_plane: f32,
+    camera: Vec2,
+    facing: f32,
+    field_of_view: f32,
+    remote_players: &RemotePlayers,
+    target_server_time_ms: f64,
+) {
+    let screen_height = screen_height();
+    for player in remote_players.iter() {
+        let (pos, _) = player.render_state(target_server_time_ms);
+        let Some(projection) = project_sprite(
+            camera,
+            facing,
+            field_of_view,
+            columns.len() as f32,
+            projection_plane,
+            pos,
+        ) else {
+            continue;
+        };
+
+        let full_height = projection.screen_height.min(screen_height * 3.0);
+        let sprite_height = full_height * SPRITE_HEIGHT_RATIO;
+        let bottom_y = (screen_height + full_height) * 0.5;
+        let top_y = bottom_y - sprite_height;
+        let brightness = (1.0 / (1.0 + projection.depth * 0.12)).clamp(0.25, 1.0);
+        let color = Color::new(0.85 * brightness, 0.2 * brightness, 0.2 * brightness, 1.0);
+
+        let range = sprite_column_range(&projection, columns.len(), SPRITE_WIDTH_RATIO);
+        for column in range {
+            if is_occluded(&projection, columns[column]) {
+                continue;
+            }
+            draw_rectangle(column as f32, top_y, 1.1, sprite_height, color);
+        }
     }
 }
