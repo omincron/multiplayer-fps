@@ -3,6 +3,7 @@
 pub mod fps;
 pub mod interp;
 pub mod killfeed;
+pub mod level;
 pub mod maze;
 pub mod net;
 pub mod players;

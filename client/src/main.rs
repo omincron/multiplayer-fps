@@ -1,6 +1,7 @@
 use client::fps::FpsMeter;
 use client::interp::{ClockSync, tick_to_server_time_ms};
 use client::killfeed::KillFeed;
+use client::level::LevelState;
 use client::maze::build_and_validate;
 use client::net::{Connection, connect, send_message, spawn_receiver};
 use client::players::RemotePlayers;
@@ -37,10 +38,11 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
 
     let connection = connect(address, &name)?;
     let maze = build_and_validate(connection.welcome.maze.clone())?;
+    let level_state = LevelState::new(connection.welcome.level, connection.welcome.level_epoch, maze);
     let incoming = spawn_receiver(&connection.socket)?;
     macroquad::Window::from_config(
         window_config(),
-        run_window(connection, incoming, name, maze),
+        run_window(connection, incoming, name, level_state),
     );
     Ok(())
 }
@@ -59,14 +61,10 @@ async fn run_window(
     connection: Connection,
     incoming: Receiver<ServerMsg>,
     name: String,
-    maze: MazeData,
+    mut level_state: LevelState,
 ) {
     let mut fps_meter = FpsMeter::default();
-    let spawn_position = Vec2::new(
-        (maze.grid.width / 2) as f32 + 0.5,
-        (maze.grid.height / 2) as f32 + 0.5,
-    );
-    let mut predictor = Predictor::new(spawn_position);
+    let mut predictor = Predictor::new(level_state.spawn_point());
     let mut camera_correction = Vec2::ZERO;
     let mut camera_angle = 0.0_f32;
     let mut remote_players = RemotePlayers::default();
@@ -119,9 +117,13 @@ async fn run_window(
         // (Architecture §4.3): a shot is a discrete event, not a rate to
         // sustain like movement.
         let shoot = is_key_pressed(KeyCode::Space) || is_mouse_button_pressed(MouseButton::Left);
-        for input in
-            predictor.advance_frame(frame_time, move_dir, camera_angle, shoot, &maze.grid)
-        {
+        for input in predictor.advance_frame(
+            frame_time,
+            move_dir,
+            camera_angle,
+            shoot,
+            &level_state.maze().grid,
+        ) {
             let message = ClientMsg::Input {
                 input_tick: input.input_tick,
                 move_dir: input.move_dir,
@@ -139,7 +141,7 @@ async fn run_window(
                     tick,
                     level_epoch,
                     players,
-                } if level_epoch == connection.welcome.level_epoch => {
+                } if level_state.accepts(level_epoch) => {
                     let snapshot_server_time_ms =
                         tick_to_server_time_ms(tick, clock_anchor.0, clock_anchor.1);
                     remote_players.apply_snapshot(
@@ -153,12 +155,21 @@ async fn run_window(
                         .find(|player| player.id == connection.welcome.player_id)
                     {
                         own_hp = player.hp;
-                        let correction =
-                            predictor.reconcile(player.pos, player.last_input_tick, &maze.grid);
+                        let correction = predictor.reconcile(
+                            player.pos,
+                            player.last_input_tick,
+                            &level_state.maze().grid,
+                        );
                         camera_correction.x -= correction.x;
                         camera_correction.y -= correction.y;
                     }
                 }
+                // A `WorldState` for a maze this client hasn't adopted yet
+                // (§4.4) — `LevelChanged` is reliable but retried on a
+                // 100ms timer while snapshots arrive every ~33ms, so this
+                // is an expected, frequent race right after a level
+                // change, not an error. Discarded, never rendered.
+                ServerMsg::WorldState { .. } => {}
                 ServerMsg::Event { event_id, kind } => {
                     remote_players.apply_event(&kind);
                     match &kind {
@@ -194,6 +205,42 @@ async fn run_window(
                             };
                             kill_feed.push(message, local_now_ms);
                         }
+                        EventKind::LevelChanged {
+                            level,
+                            level_epoch,
+                            maze: source,
+                        } => {
+                            match level_state.apply_level_changed(
+                                *level,
+                                *level_epoch,
+                                source.clone(),
+                            ) {
+                                Ok(()) => {
+                                    // A level change is a full-server reset
+                                    // (§4.4: "resets player positions"), so
+                                    // every piece of state keyed to the old
+                                    // geometry is stale, not just the grid:
+                                    // predicted history references walls
+                                    // that may no longer exist, and remote
+                                    // players' interpolation buffers hold
+                                    // positions from a maze that's gone.
+                                    // hp is deliberately left alone here —
+                                    // the server doesn't reset it on a
+                                    // level change (only a death/respawn
+                                    // does), and it's already driven
+                                    // purely from `WorldState` above, so
+                                    // touching it here would just be a
+                                    // momentarily-wrong guess.
+                                    predictor.respawn_to(level_state.spawn_point());
+                                    camera_correction = Vec2::ZERO;
+                                    remote_players = RemotePlayers::default();
+                                }
+                                Err(error) => {
+                                    network_error =
+                                        Some(format!("failed to apply level change: {error}"));
+                                }
+                            }
+                        }
                         _ => {}
                     }
                     if let Err(error) =
@@ -212,9 +259,7 @@ async fn run_window(
                         clock_anchor = (server_tick, server_time_ms);
                     }
                 }
-                ServerMsg::Welcome { .. }
-                | ServerMsg::Rejected { .. }
-                | ServerMsg::WorldState { .. } => {}
+                ServerMsg::Welcome { .. } | ServerMsg::Rejected { .. } => {}
             }
         }
 
@@ -226,7 +271,8 @@ async fn run_window(
             predicted.x + camera_correction.x,
             predicted.y + camera_correction.y,
         );
-        draw_maze_view(&maze, camera_position, camera_angle, FIELD_OF_VIEW);
+        let maze = level_state.maze();
+        draw_maze_view(maze, camera_position, camera_angle, FIELD_OF_VIEW);
         let minimap_scale = 220.0 / (maze.grid.width.max(maze.grid.height) as f32);
         let minimap = MinimapRect {
             width: maze.grid.width as f32 * minimap_scale,

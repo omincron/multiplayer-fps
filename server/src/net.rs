@@ -14,14 +14,8 @@ use common::config::{Config, GENERATOR_VERSION, MAX_PAYLOAD_BYTES};
 use common::maze::{self, MazeData, MazeSpec};
 use common::protocol::{self, ClientMsg, ServerMsg};
 
+use crate::levels::LEVELS;
 use crate::world;
-
-/// Default maze generated at server startup. No `server::levels` table
-/// yet (Milestone 14) — every joining player gets this same maze until
-/// then.
-const STARTUP_MAZE_WIDTH: u16 = 20;
-const STARTUP_MAZE_HEIGHT: u16 = 20;
-const STARTUP_MAZE_BRAID_FACTOR: f32 = 0.3;
 
 /// Binds `config.bind_addr`, spawns the socket I/O thread and the
 /// authoritative simulation thread, and returns the address actually
@@ -30,11 +24,12 @@ const STARTUP_MAZE_BRAID_FACTOR: f32 = 0.3;
 /// the process — no graceful shutdown yet; test binaries clean up their
 /// sockets on process exit.
 pub fn spawn(config: Config) -> std::io::Result<SocketAddr> {
+    let level = &LEVELS[0];
     let spec = MazeSpec {
         seed: rand::random(),
-        width: STARTUP_MAZE_WIDTH,
-        height: STARTUP_MAZE_HEIGHT,
-        braid_factor: STARTUP_MAZE_BRAID_FACTOR,
+        width: level.grid_w,
+        height: level.grid_h,
+        braid_factor: level.braid_factor,
         generator_version: GENERATOR_VERSION,
     };
     spawn_with_maze(config, maze::generate(spec))

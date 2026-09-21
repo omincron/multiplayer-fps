@@ -89,6 +89,17 @@ fn shooting_aimed_target_deals_damage_then_kills_and_respawns_them() {
         panic!("expected Welcome for target")
     };
 
+    // Drain and ack the `PlayerJoined` event the shooter receives for
+    // target's join. Left unacked, the reliability layer retries it every
+    // `RETRY_INTERVAL_MS` for the rest of the test and a retry landing
+    // mid-test could be misread by `next_event` as one of the later
+    // expected Hit/Killed/Respawned events — a real, observed flake, not
+    // a hypothetical one.
+    assert!(matches!(
+        next_event(&shooter),
+        EventKind::PlayerJoined { .. }
+    ));
+
     // Move the target several cells east so there's real distance between
     // the two, then confirm it actually moved before trusting the shot
     // geometry below — a stub that never applies movement would otherwise

@@ -56,6 +56,14 @@ pub const HIT_DAMAGE: u8 = 25;
 /// always decided by a wall or a player, never by an arbitrary range cutoff.
 pub const MAX_SHOT_RANGE: f32 = 100.0;
 
+/// Milestone 14 addition. Time-based level progression (§4.4 leaves the
+/// trigger condition to the implementation): long enough for a real match
+/// to be felt at each difficulty, short enough that a demo/audit run
+/// actually sees more than one level in a few minutes. Not a bare
+/// `const` at the use site — same reasoning as `client_timeout_ms` etc.,
+/// an integration test needs to shrink this to something sub-second.
+pub const LEVEL_DURATION_MS: u64 = 90_000;
+
 /// Production UDP port. Not part of the ARCHITECTURE.md §9 constant table
 /// (that section only names the field, "0.0.0.0:PORT") — picked here as
 /// the concrete default so `Config::default()` is a complete, runnable
@@ -79,6 +87,7 @@ pub struct Config {
     pub client_timeout_ms: u64,
     pub retry_interval_ms: u64,
     pub max_retry_attempts: u32,
+    pub level_duration_ms: u64,
 }
 
 impl Default for Config {
@@ -90,6 +99,7 @@ impl Default for Config {
             client_timeout_ms: CLIENT_TIMEOUT_MS,
             retry_interval_ms: RETRY_INTERVAL_MS,
             max_retry_attempts: MAX_RETRY_ATTEMPTS,
+            level_duration_ms: LEVEL_DURATION_MS,
         }
     }
 }
@@ -108,5 +118,6 @@ mod tests {
         assert_eq!(config.client_timeout_ms, CLIENT_TIMEOUT_MS);
         assert_eq!(config.retry_interval_ms, RETRY_INTERVAL_MS);
         assert_eq!(config.max_retry_attempts, MAX_RETRY_ATTEMPTS);
+        assert_eq!(config.level_duration_ms, LEVEL_DURATION_MS);
     }
 }

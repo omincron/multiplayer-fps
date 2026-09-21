@@ -16,12 +16,13 @@ use common::config::{
     Config, GENERATOR_VERSION, HIT_DAMAGE, INPUT_DT_MS, MAX_HP, MAX_INPUT_QUEUE, MAX_SHOT_RANGE,
     PLAYER_SPEED_UPS, PROTOCOL_VERSION,
 };
-use common::maze::MazeData;
+use common::maze::{self, MazeData, MazeSpec};
 use common::protocol::{self, ClientMsg, EventKind, PlayerSnapshot, ServerMsg};
 use common::reliability;
 use common::sim::{self, RaycastHit};
 use common::types::{PlayerId, Tick, Vec2};
 
+use crate::levels::LEVELS;
 use crate::net::send;
 
 /// Player collision radius passed to `resolve_move`. Well under the 0.5
@@ -69,30 +70,46 @@ pub struct World {
     next_player_id: PlayerId,
     next_event_id: u32,
     maze: MazeData,
-    /// No `server::levels` table yet (Milestone 14) — fixed at 0 for now.
+    /// Index into `crate::levels::LEVELS`. Starts at 0 (`net::spawn`
+    /// already builds the startup maze from `LEVELS[0]`, so this and the
+    /// maze agree from the first tick); advanced by `maybe_advance_level`.
     level: u8,
     level_epoch: u32,
+    /// When the current level started, for the time-based progression
+    /// trigger (§4.4 leaves the trigger condition to the implementation —
+    /// see `common::config::LEVEL_DURATION_MS`'s doc comment for why
+    /// time-based was chosen over score-based).
+    level_started_at_ms: u64,
     tick: Tick,
-    /// Fixed spawn point: the maze's center cell. Always valid floor space
-    /// regardless of that cell's walls (no cell is ever fully isolated,
-    /// §5.3 invariant 2) — not a "pick an open, unoccupied cell" spawn
-    /// algorithm, which is Milestone 13's respawn logic, not join's.
+    /// Fixed spawn point: the current maze's center cell. Always valid
+    /// floor space regardless of that cell's walls (no cell is ever fully
+    /// isolated, §5.3 invariant 2) — not a "pick an open, unoccupied cell"
+    /// spawn algorithm, which is Milestone 13's respawn logic, not join's
+    /// or a level transition's. Recomputed by `maybe_advance_level` for
+    /// each new maze's own dimensions.
     spawn_pos: Vec2,
+}
+
+/// The maze's center cell, `+0.5` to land in the middle of that cell
+/// rather than on its corner. Integer cell index first (`width / 2`), not
+/// `width as f32 / 2.0 + 0.5` — that float formula looks equivalent but
+/// isn't: for a degenerate width-1 (or height-1) grid it evaluates to
+/// exactly `width` itself, landing one full unit outside the grid and
+/// making every movement attempt fail immediately at `circle_fits`'s
+/// bounds check (Milestone 7's real bug, caught by that milestone's own
+/// tests). Shared between `World::new` and `maybe_advance_level` — every
+/// new maze, at join or at a level change, needs this same computation.
+fn grid_center_spawn(maze: &MazeData) -> Vec2 {
+    Vec2::new(
+        (maze.grid.width / 2) as f32 + 0.5,
+        (maze.grid.height / 2) as f32 + 0.5,
+    )
 }
 
 impl World {
     fn new(config: Config, maze: MazeData) -> Self {
-        // Integer cell index, not `dimension as f32 / 2.0 + 0.5` — that
-        // float formula looks equivalent but isn't: for a degenerate
-        // height-1 (or width-1) grid it evaluates to exactly `height`
-        // itself (1.0/2.0 + 0.5 == 1.0), landing one full unit outside
-        // the grid and making every movement attempt fail immediately at
-        // `circle_fits`'s bounds check. Center *cell*, then +0.5, is
-        // correct for every grid size including that one.
-        let spawn_pos = Vec2::new(
-            (maze.grid.width / 2) as f32 + 0.5,
-            (maze.grid.height / 2) as f32 + 0.5,
-        );
+        let spawn_pos = grid_center_spawn(&maze);
+        let now = now_ms();
         World {
             config,
             players: HashMap::new(),
@@ -102,6 +119,7 @@ impl World {
             maze,
             level: 0,
             level_epoch: 0,
+            level_started_at_ms: now,
             tick: 0,
             spawn_pos,
         }
@@ -260,9 +278,58 @@ impl World {
         self.tick += 1;
         let shots = self.apply_queued_input();
         self.resolve_shots(socket, shots);
+        self.maybe_advance_level(socket);
         self.check_idle_timeouts(socket);
         self.retry_due_events(socket);
         self.broadcast_world_state(socket);
+    }
+
+    /// Time-based level progression (§4.4): once `level_duration_ms` has
+    /// elapsed, cycle to the next entry in `LEVELS` (wrapping back to 0
+    /// after the hardest one, rather than stopping — there's no win/game-
+    /// over state defined anywhere in the architecture, so looping keeps a
+    /// long-running server continuously playable instead of plateauing).
+    /// Regenerates the maze, resets every connected player to the new
+    /// maze's spawn point (§4.4: "resets player positions to valid spawn
+    /// cells" — necessary, not just tidy, since a level can shrink when
+    /// wrapping from the largest maze back to the smallest, and an old
+    /// position could land outside the new grid's bounds entirely), and
+    /// broadcasts `LevelChanged` so clients rebuild their own maze and
+    /// discard now-stale prediction/interpolation state.
+    fn maybe_advance_level(&mut self, socket: &UdpSocket) {
+        let now = now_ms();
+        if now.saturating_sub(self.level_started_at_ms) < self.config.level_duration_ms {
+            return;
+        }
+
+        self.level = ((self.level as usize + 1) % LEVELS.len()) as u8;
+        self.level_epoch += 1;
+        self.level_started_at_ms = now;
+
+        let level = &LEVELS[self.level as usize];
+        self.maze = maze::generate(MazeSpec {
+            seed: rand::random(),
+            width: level.grid_w,
+            height: level.grid_h,
+            braid_factor: level.braid_factor,
+            generator_version: GENERATOR_VERSION,
+        });
+        self.spawn_pos = grid_center_spawn(&self.maze);
+
+        for player in self.players.values_mut() {
+            player.pos = self.spawn_pos;
+            player.input_queue.clear();
+        }
+
+        self.broadcast_event(
+            socket,
+            EventKind::LevelChanged {
+                level: self.level,
+                level_epoch: self.level_epoch,
+                maze: self.maze.source.clone(),
+            },
+            None,
+        );
     }
 
     /// One `resolve_move` step per queued input, oldest first, capped at

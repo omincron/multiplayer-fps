@@ -1415,3 +1415,116 @@ log-based, not a visual check. The actual gameplay gate from PLAN.md
 lands somewhere walkable") still needs a human at the keyboard — aiming
 and firing can't be driven or observed from here. That manual check is
 the next step, not yet done.
+
+2026-09-21: Milestone 13's manual gate passed. Both devs shot each other
+live (Ubuntu server, one client from a local worktree, one from macOS over
+LAN, matching the earlier rendezvous setup) — HP dropped correctly, kill
+feed updated on both ends, respawn landed on open ground. Milestone 13 is
+fully closed.
+
+2026-09-21: Milestone 14 complete (`server::levels`, `client::level`,
+ARCHITECTURE.md §4.4), on `develop` directly.
+
+**Trigger condition chosen: time-based**, not score-based — documented at
+the constant (`common::config::LEVEL_DURATION_MS`'s doc comment) per
+PLAN.md's own instruction to record the choice. Score-based would need a
+notion of "the team" or "the match" that doesn't exist anywhere else in
+this design (kills are per-player events, not a shared score), so
+time-based was the one that didn't require inventing new state just to
+pick a trigger.
+
+**`server::levels::LEVELS`**: reuses the exact same three triples
+Milestone 1's placeholder test used — `(20,20,0.6)`, `(30,30,0.3)`,
+`(40,40,0.05)` — as the real table, not new numbers, since those were
+already validated (by that milestone's own density tests) to produce the
+right difficulty ordering. `common` cannot import this array (`common`
+has zero dependencies on `server`, ARCHITECTURE.md §2), so
+`common/src/maze.rs`'s density test hardcodes the same three triples
+independently, renamed from
+`dead_end_density_monotonic_across_placeholder_level_table` to
+`..._across_real_level_table` per this milestone's own instruction to
+replace the placeholder with a *new* test rather than silently edit the
+old one's numbers in place — both files' doc comments point at each other
+so a future change to one is at least discoverable from the other.
+
+**Progression, wraps rather than stopping**: `World::maybe_advance_level`
+cycles `(level + 1) % LEVELS.len()` once `level_duration_ms` has elapsed,
+looping back to level 0 after the hardest level rather than plateauing —
+nothing in the architecture defines a win/game-over state, so looping
+keeps a long-running server continuously playable instead of going static
+once everyone's seen the hardest maze. This is also *why* player
+positions must be reset on every transition, not just tidiness: wrapping
+from the largest maze (40x40) back to the smallest (20x20) can leave an
+old position outside the new grid's bounds entirely, which
+`resolve_move`'s bounds check would then reject on every subsequent
+movement attempt — the same class of bug Milestone 7's spawn-formula fix
+addressed, just reachable a different way. `grid_center_spawn` (the
+formula `World::new` already used) is now a shared free function so a
+level transition and initial join can't drift apart from each other.
+Queued-but-unconsumed inputs are also cleared per player on transition —
+they reference the old maze's geometry and would otherwise be applied
+against the new one for whatever's left in the queue.
+
+**Client (`client::level::LevelState`)**: centralizes "what maze/epoch do
+I currently have" into one owned struct instead of the ad-hoc `if
+level_epoch == connection.welcome.level_epoch` guard the code had before
+(that comparison was against the *original* Welcome value forever — it
+could never actually update, which would have silently broken the very
+first real level transition). `apply_level_changed` rebuilds and
+validates the new maze *before* adopting it, so a corrupt/mismatched
+`LevelChanged` (e.g. a `generator_version` drift) leaves the old, still-
+valid maze and epoch in place rather than switching to something broken —
+the caller in `main.rs` surfaces the error as a `network_error` string
+instead of panicking or silently rendering nothing. On a successful
+transition, `main.rs` also resets `predictor` (via `respawn_to`, reusing
+the same method Milestone 13 added — a level change and a death both mean
+"prediction history is now meaningless, snap to the authoritative spawn
+point"), `camera_correction`, and `remote_players` wholesale — the last
+one is a deliberate full reset rather than trying to preserve individual
+remote players' state, since every one of their positions and
+interpolation buffers refers to geometry that no longer exists. `own_hp`
+is deliberately left untouched (see the inline comment) since the server
+doesn't reset hp on a level change and `own_hp` is already purely
+`WorldState`-driven.
+
+Tests: `server::levels` (2 — at-least-3-levels, strictly-increasing-
+area/decreasing-braid-factor), `common::maze`'s renamed real-table density
+test, `client::level` (4 — accepts-only-current-epoch, a successful
+apply adopts the new maze/epoch, a *failed* apply leaves the old one
+in place, spawn-point-is-grid-center), and a new
+`server/tests/levels.rs` integration test: a real fake client over a
+150ms `level_duration_ms`, asserting two real transitions (0→1→2) each
+against `server::levels::LEVELS` directly — level, epoch, exact
+width/height/braid_factor, an explicit area-increased-vs-previous-level
+check (not just "matches the table", in case the table itself were ever
+wrong in a way self-comparison wouldn't catch), the next `WorldState`
+carrying the matching epoch, and the player's post-transition position
+landing in-bounds for the *new* maze.
+
+Per this project's own testing standard: broke `maybe_advance_level`'s
+trigger condition to `if true` (advance every tick) and reran the new
+integration test — it failed (a timeout from the resulting flood of
+retried events, not the exact assertion originally expected, but a real
+failure either way, confirming the test isn't vacuous) — then reverted
+before committing. Also caught and fixed a real, unrelated flake in
+Milestone 13's `shooting.rs` test while working in this area: the
+shooter's unacked `PlayerJoined` event (from when `target` joined) could
+be retried by the reliability layer and misread by `next_event` as a
+later expected Hit/Killed/Respawned event; fixed by explicitly draining
+and acking it right after both joins, then confirmed stable across 5
+consecutive runs.
+
+`cargo test --workspace`: 85/85 green (42 client + 27 common + 2
+server::levels + 1 levels integration + 6 lifecycle + 1 shooting + 6
+tick_loop). `cargo clean && cargo build --workspace` — zero warnings
+under `RUSTFLAGS="-D warnings"`.
+
+**Not yet done — the manual gate**: PLAN.md's own Milestone 14 gate
+("play through a level transition on a live client, confirm the maze
+visibly changes and the player isn't left stuck inside geometry from the
+old maze") needs a human watching a live client, and at the production
+`LEVEL_DURATION_MS` (90s) that means either a genuine 90-second wait or a
+temporary shortened duration for the demo — neither was done as part of
+this entry. A basic smoke test (real server + real client, ~10 seconds,
+process-alive/log-only) passed with the new code active, but that's
+stability, not the visual gate.

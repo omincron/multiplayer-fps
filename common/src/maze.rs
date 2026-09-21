@@ -399,11 +399,18 @@ mod tests {
     }
 
     #[test]
-    fn dead_end_density_monotonic_across_placeholder_level_table() {
-        // Placeholder stand-in for server::levels (built in Milestone 14):
-        // grid area increases, braid_factor decreases, level over level.
-        // Density (not raw count, §5.3 invariant 5) must still increase
-        // even though area is changing at the same time.
+    fn dead_end_density_monotonic_across_real_level_table() {
+        // Milestone 14: this replaces the Milestone 1 placeholder test
+        // (which used the same three triples as a stand-in, per that
+        // milestone's own log entry, and this milestone's own instruction
+        // to replace it with a new test once real numbers existed rather
+        // than silently editing the old one in place). These triples MUST
+        // match `server::levels::LEVELS` by hand — `common` has zero
+        // dependencies on `server` (ARCHITECTURE.md §2), so there is no
+        // way to import that table directly; `server::levels`'s own doc
+        // comment points back here for the same reason. Density (not raw
+        // count, §5.3 invariant 5) must still increase even though area is
+        // changing at the same time.
         let table = [(20u16, 20u16, 0.6_f32), (30, 30, 0.3), (40, 40, 0.05)];
         let seeds = 0..40u64;
         let mut avg_density = Vec::new();

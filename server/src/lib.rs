@@ -2,5 +2,6 @@
 //! `net::spawn` directly — a bin-only crate can't be linked by its own
 //! integration tests.
 
+pub mod levels;
 pub mod net;
 pub mod world;
