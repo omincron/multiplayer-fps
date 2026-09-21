@@ -1619,3 +1619,32 @@ feed, level progression, and load/soak validation are all built, tested,
 and manually verified end to end. Remaining work is Milestone 16+ bonus
 features only (§7: AI bots as a real feature, maze editor, host-history
 launcher — procedural levels already satisfied by Milestone 14).
+
+2026-09-21: **Not a milestone** — first-person player sprites, done on a
+separate `player-sprites` branch (off `develop`) deliberately, since
+nothing in the audit checklist asks for this; kept out of `develop` so
+the audited core stays exactly what was gated above.
+`client::render::sprites` projects each remote player into screen space
+(fisheye-corrected depth on the same scale as `ViewColumn::depth`, FOV
+cutoff with margin for partially-visible edge cases) and occludes it
+per-column against the wall depth buffer `draw_maze_view` already
+computes for that frame — `draw_maze_view` now returns that buffer
+instead of consuming it internally, specifically so sprites can reuse it
+rather than re-raycasting. Rendered as a plain colored vertical-strip
+billboard (no texture assets — see the earlier conversation about not
+using downloaded/copyrighted art), sized as a fraction of the wall-height
+formula so it reads as person-sized rather than wall-sized, anchored to
+the floor line rather than screen-centered so it doesn't look like it's
+floating.
+
+8 new unit tests (hand-computed screen position/depth for known
+camera/sprite placements, FOV-edge and behind-camera rejection, and
+occlusion in both directions), one spot-checked by breaking `is_occluded`
+and confirming a test fails, per this project's established testing
+standard. `cargo test --workspace` and `cargo clean && cargo build
+--workspace` both clean.
+
+Manually verified: real server + one `xtask` bot + one real client
+(`patou`). Confirmed: the other player renders as a visible colored
+rectangle, correctly hides behind walls, and apparent size scales with
+distance believably. Bonus feature's own visual gate passed.
