@@ -1276,3 +1276,77 @@ this before treating Milestone 12 as fully closed — it's cheap (throttle
 one client's socket read rate or add a small sleep in its recv path per
 Architecture §6.4's own suggestion) and it's the one case most likely to
 reveal a bug the happy-path check can't.
+
+2026-09-21: Milestone 13, server half complete (`server::world`,
+ARCHITECTURE.md §4.3), on `develop` directly — no more separate tracks for
+this milestone since it's genuinely joint. Client half (HUD health display,
+kill feed from events) is still open, owned by `client-track`'s dev.
+
+**New shared constants** (`common::config`, not in the original §9 table):
+`MAX_HP = 100`, `HIT_DAMAGE = 25` (4 hits to kill), `MAX_SHOT_RANGE = 100.0`
+(comfortably past the largest configured maze's ~56.6-unit diagonal, so a
+shot's outcome is always a wall or a player, never an arbitrary cutoff).
+`handle_join`'s hardcoded `hp: 100` was promoted to `MAX_HP` at the same
+time, per this file's own "hardcoding one of these values inline instead of
+importing the constant is a bug waiting to happen" rule.
+
+**Design**: `apply_queued_input` now also returns a `Vec<ShotRequest>`
+(shooter id + the position/facing *at that specific queued input step*, not
+wherever the player ends up after every queued input this tick finishes) —
+resolution is deferred to a separate `resolve_shots` pass over the returned
+list, called right after, because `raycast_hit` needs read access to every
+*other* player's position while `apply_queued_input` still holds a mutable
+borrow on the shooter. `resolve_shots` re-reads the candidate list fresh
+for each shot in the list (not once up front), so two shots landing in the
+same tick that both connect see a consistent, up-to-date world — e.g. a
+target respawned by an earlier shot this tick isn't shot again at its
+stale pre-respawn position. Damage/kill/respawn is one path
+(`apply_hit` → `respawn`): hp drops, `Hit` broadcasts, and at exactly 0 hp
+`Killed` broadcasts followed immediately by `Respawned` — no death/waiting
+period, matching the milestone's own wording ("a subsequent Respawned event
+places the player"). All three events broadcast to everyone (`exclude:
+None`), same as existing events, since kill feed needs everyone informed,
+not just the two players involved.
+
+**Respawn placement**: uniformly random `(x, y)` within the current maze's
+grid bounds. No "is this cell walled on all sides" check is needed or
+added: walls live on cell *edges* (§5.1), never inside a cell, and §5.3
+invariant 2 already guarantees no cell is fully isolated — so every
+in-bounds grid cell is valid floor space. This is a materially different
+spawn rule from `World::new`'s fixed grid-center `spawn_pos` (join still
+uses that, respawn does not) — worth remembering if a future milestone
+wants to unify them.
+
+Tests (`server/tests/shooting.rs`, real loopback sockets, same pattern as
+`tick_loop.rs`): two fake clients, target moved several cells away from a
+stationary shooter (with an explicit assertion that it actually moved,
+not just "some position came back"), then exactly `MAX_HP / HIT_DAMAGE`
+aimed shots — asserting `Hit`'s `target_hp` matches the expected running
+total after *each* one, not just the last — followed by `Killed` (right
+shooter/victim ids) and `Respawned` (position checked against the actual
+maze bounds, not just "a position came back," per this milestone's own
+phrasing), and finally that the *next* `WorldState` agrees with the
+`Respawned` event's position and full hp — the event stream and
+`WorldState` must not disagree. The test acks every event it receives
+(`ClientMsg::Ack`) as a real client would; without that, an unacked `Hit`
+retried by the reliability layer mid-test could be misread as a later
+expected event — caught while writing the test, not left as a latent
+flake.
+
+Per this project's own testing standard (§8.6 / PLAN.md's repeated
+"verify the test can actually fail" instruction): temporarily commented
+out the damage line in `apply_hit`, reran — the test failed with `left:
+100, right: 75` on the first `Hit` assertion, exactly as expected — then
+reverted before committing.
+
+Gate (server half only — full Milestone 13 gate needs the client HUD/kill
+feed piece too): `cargo clean && cargo build --workspace` — zero warnings
+under `RUSTFLAGS="-D warnings"`. `cargo test --workspace` — 73/73 green
+(33 client + 27 common + 6 lifecycle + 1 shooting + 6 tick_loop).
+
+**Open for the joint session**: client needs to send `shoot: true` on
+fire input (already part of the wire format since Milestone 2 — nothing
+new needed there), react to `Hit`/`Killed`/`Respawned` events for the
+health display and kill feed, and the two of you should do the manual
+"shoot each other, confirm hp/kill feed update on both ends, respawn
+lands somewhere walkable" check together once that's wired up.

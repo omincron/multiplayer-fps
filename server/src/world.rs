@@ -10,13 +10,16 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use rand::Rng;
+
 use common::config::{
-    Config, GENERATOR_VERSION, INPUT_DT_MS, MAX_INPUT_QUEUE, PLAYER_SPEED_UPS, PROTOCOL_VERSION,
+    Config, GENERATOR_VERSION, HIT_DAMAGE, INPUT_DT_MS, MAX_HP, MAX_INPUT_QUEUE, MAX_SHOT_RANGE,
+    PLAYER_SPEED_UPS, PROTOCOL_VERSION,
 };
 use common::maze::MazeData;
 use common::protocol::{self, ClientMsg, EventKind, PlayerSnapshot, ServerMsg};
 use common::reliability;
-use common::sim;
+use common::sim::{self, RaycastHit};
 use common::types::{PlayerId, Tick, Vec2};
 
 use crate::net::send;
@@ -31,8 +34,19 @@ struct QueuedInput {
     input_tick: Tick,
     move_dir: Vec2,
     facing: f32,
-    #[allow(dead_code)] // wired up in Milestone 13
     shoot: bool,
+}
+
+/// A shot to resolve, captured at the position/facing the shooter actually
+/// had *at that input step* — not wherever they end up after every queued
+/// input this tick finishes applying. Resolution itself is deferred to a
+/// separate pass (`resolve_shots`) because it needs read access to every
+/// other player's position while `apply_queued_input` is still mutably
+/// borrowing the shooter.
+struct ShotRequest {
+    shooter: PlayerId,
+    origin: Vec2,
+    facing: f32,
 }
 
 struct PlayerState {
@@ -206,7 +220,7 @@ impl World {
                 name: name.clone(),
                 pos: self.spawn_pos,
                 facing: 0.0,
-                hp: 100,
+                hp: MAX_HP,
                 last_seen_ms: now,
                 input_queue: VecDeque::new(),
                 last_input_tick: 0,
@@ -244,7 +258,8 @@ impl World {
     /// retry due events, broadcast `WorldState`.
     fn tick(&mut self, socket: &UdpSocket) {
         self.tick += 1;
-        self.apply_queued_input();
+        let shots = self.apply_queued_input();
+        self.resolve_shots(socket, shots);
         self.check_idle_timeouts(socket);
         self.retry_due_events(socket);
         self.broadcast_world_state(socket);
@@ -258,8 +273,9 @@ impl World {
     /// (Milestone 10) for a player who did nothing wrong. Extra queued
     /// inputs beyond the cap simply wait for the next tick ("it just backs
     /// up") rather than being dropped.
-    fn apply_queued_input(&mut self) {
+    fn apply_queued_input(&mut self) -> Vec<ShotRequest> {
         let dt_s = INPUT_DT_MS / 1000.0;
+        let mut shots = Vec::new();
         for player in self.players.values_mut() {
             for _ in 0..MAX_INPUT_QUEUE {
                 let Some(input) = player.input_queue.pop_front() else {
@@ -282,8 +298,106 @@ impl World {
                 // with max() anyway: cheap, and correct if that ever
                 // changes.
                 player.last_input_tick = player.last_input_tick.max(input.input_tick);
+                if input.shoot {
+                    shots.push(ShotRequest {
+                        shooter: player.id,
+                        origin: player.pos,
+                        facing: player.facing,
+                    });
+                }
             }
         }
+        shots
+    }
+
+    /// Resolves each shot queued this tick against the *current* positions
+    /// of every other player (re-read fresh per shot, so two separate shots
+    /// this tick that both connect see a consistent, up-to-date world —
+    /// e.g. a target respawned by an earlier shot isn't shot again at its
+    /// old position) and the maze's walls. §4.3: hitscan, resolved inside
+    /// the tick that requested it — there is no projectile entity anywhere
+    /// in `World` or on the wire.
+    fn resolve_shots(&mut self, socket: &UdpSocket, shots: Vec<ShotRequest>) {
+        for shot in shots {
+            // The shooter may have timed out/left earlier this same tick.
+            if !self.players.contains_key(&shot.shooter) {
+                continue;
+            }
+            let candidates: Vec<(PlayerId, Vec2)> = self
+                .players
+                .values()
+                .filter(|p| p.id != shot.shooter)
+                .map(|p| (p.id, p.pos))
+                .collect();
+            let hit = sim::raycast_hit(
+                &self.maze.grid,
+                shot.origin,
+                shot.facing,
+                &candidates,
+                PLAYER_RADIUS,
+                MAX_SHOT_RANGE,
+            );
+            if let Some(RaycastHit::Player { id: target, .. }) = hit {
+                self.apply_hit(socket, shot.shooter, target);
+            }
+            // A wall hit or a clean miss has no gameplay effect to report —
+            // no `Event` variant exists for "shot and missed" (§3.2), and
+            // none is needed.
+        }
+    }
+
+    /// Applies one hit's damage, broadcasts `Hit`, and — at 0 hp —
+    /// broadcasts `Killed` and immediately respawns the victim. No death/
+    /// waiting period: the victim's `PlayerState` goes from 0 hp straight
+    /// to a fresh spawn within this same tick.
+    fn apply_hit(&mut self, socket: &UdpSocket, shooter: PlayerId, target: PlayerId) {
+        let Some(player) = self.players.get_mut(&target) else {
+            return; // target left/timed out between the shot and resolution
+        };
+        player.hp = player.hp.saturating_sub(HIT_DAMAGE);
+        let target_hp = player.hp;
+        self.broadcast_event(
+            socket,
+            EventKind::Hit {
+                shooter,
+                target,
+                target_hp,
+            },
+            None,
+        );
+
+        if target_hp == 0 {
+            self.broadcast_event(
+                socket,
+                EventKind::Killed {
+                    victim: target,
+                    killer: shooter,
+                },
+                None,
+            );
+            self.respawn(socket, target);
+        }
+    }
+
+    /// Picks a random cell within the current maze's bounds and moves the
+    /// player there at full hp. No "is this cell walled on all sides"
+    /// check is needed: walls live on cell *edges* (§5.1), never inside a
+    /// cell, and §5.3 invariant 2 guarantees no cell is isolated anyway —
+    /// so every in-bounds grid cell is valid floor space to respawn onto.
+    fn respawn(&mut self, socket: &UdpSocket, id: PlayerId) {
+        let pos = self.random_open_cell();
+        if let Some(player) = self.players.get_mut(&id) {
+            player.pos = pos;
+            player.hp = MAX_HP;
+        }
+        self.broadcast_event(socket, EventKind::Respawned { id, pos }, None);
+    }
+
+    fn random_open_cell(&self) -> Vec2 {
+        let mut rng = rand::thread_rng();
+        let x = rng.gen_range(0..self.maze.grid.width);
+        let y = rng.gen_range(0..self.maze.grid.height);
+        Vec2::new(x as f32 + 0.5, y as f32 + 0.5)
     }
 
     /// Unreliable, unordered, latest-wins (§3.1) — no reliability wrapper,

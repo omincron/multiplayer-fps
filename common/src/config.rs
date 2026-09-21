@@ -42,6 +42,20 @@ pub const FPS_AVG_WINDOW_FRAMES: usize = 60;
 /// message must fit under this to avoid UDP fragmentation (§3.2).
 pub const MAX_PAYLOAD_BYTES: usize = 1200;
 
+/// Milestone 13 additions — not in ARCHITECTURE.md §9's original constant
+/// table (shooting/health was specced there only at the message-type
+/// level), added here rather than left as inline literals in
+/// `server::world` for the same "single source of truth" reason as
+/// everything else in this file. Logged in PLAN.md's running log.
+pub const MAX_HP: u8 = 100;
+/// 4 hits to kill at `MAX_HP` — fast enough to keep a firefight short
+/// without a single lucky hit being an instant kill.
+pub const HIT_DAMAGE: u8 = 25;
+/// Comfortably longer than the largest configured maze's diagonal (a
+/// 40x40 grid is ~56.6 units corner-to-corner), so a shot's outcome is
+/// always decided by a wall or a player, never by an arbitrary range cutoff.
+pub const MAX_SHOT_RANGE: f32 = 100.0;
+
 /// Production UDP port. Not part of the ARCHITECTURE.md §9 constant table
 /// (that section only names the field, "0.0.0.0:PORT") — picked here as
 /// the concrete default so `Config::default()` is a complete, runnable
