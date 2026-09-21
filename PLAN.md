@@ -952,7 +952,53 @@ client + 27 common). Client-only `rustfmt --check`, client Clippy with warnings
 denied, `RUSTFLAGS='-D warnings' cargo build --workspace`, and `git diff
 --check` all pass.
 
-Remaining Milestone 9 gate: run against the real server and visually rotate
-through the received maze, confirming sensible wall distances/angles, aligned
-geometry, and no visible fisheye curvature. Do not mark Milestone 9 complete
-until that visual check passes.
+2026-09-21: Milestone 9 complete. The team ran the renderer against the real
+server maze, confirmed walls were visible and the camera rotated correctly
+with A/D, and accepted the visual rendering gate. Traversal was intentionally
+not part of this milestone; fixed-step movement and collision begin in
+Milestone 10 so rendering and movement failures remain independently testable.
+
+2026-09-21: Milestone 10 automated portion complete on `client-track`. Added a
+pure `Predictor` that accumulates rendered-frame time and emits exactly one
+numbered input for each whole `INPUT_DT_MS`. Every emitted input immediately
+advances local position through the shared `common::sim::resolve_move` using
+the server-owned speed, then enters a bounded history sized from
+`CLIENT_INPUT_HZ * MAX_RTT_S`.
+
+Reconciliation looks up the history entry matching
+`PlayerSnapshot.last_input_tick`, never the newest prediction. If that older
+prediction agrees with the authoritative position, acknowledged entries are
+discarded without moving the current prediction. On divergence, prediction
+resets to the authoritative position and replays every newer input. The GUI
+maintains a separately decaying correction offset so an actual correction is
+visually blended while normal locally predicted movement remains immediate.
+
+W/S or Up/Down now produce forward/backward movement relative to facing;
+A/D or Left/Right rotate. The camera and server input both advance on the same
+fixed steps, and rendering reads the predicted position. The UDP connection is
+split by cloning the already-connected socket: the original sends inputs while
+a dedicated blocking receive thread decodes server messages into a channel
+that the render loop drains with `try_recv`. Snapshots from a different
+`level_epoch` are ignored.
+
+TDD evidence: immediate local movement, 30-vs-120-fps equivalence over one
+second, and zero correction when an older acknowledged prediction matches were
+written red first. The exact-step test exposed an f32/f64 boundary mismatch
+that initially emitted zero inputs and was fixed by computing the fixed step
+with the shared f32 expression before promotion. A real loopback UDP test also
+proves sending and receiving through the cloned socket preserve one connected
+transport identity.
+
+Verification: `cargo test --workspace` passes 49 tests total (22 client + 27
+common). Client-only `rustfmt --check`, client Clippy with warnings denied,
+`RUSTFLAGS='-D warnings' cargo build --workspace`, and `git diff --check` pass.
+
+Coordination note: client prediction uses radius `0.25`, matching
+`server::world::PLAYER_RADIUS`. That radius is server-local rather than part of
+the frozen `common` API; promote it to the shared contract on `develop` if the
+value ever changes so the two tracks cannot drift.
+
+Remaining Milestone 10 gate: run with the real server and confirm W/S movement
+responds immediately, stops at walls, slides along corners, and does not show
+visible reconciliation snapping. Artificial-latency behavior remains an
+explicit re-check once Milestone 13's latency tool exists.

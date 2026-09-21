@@ -3,5 +3,6 @@
 pub mod fps;
 pub mod maze;
 pub mod net;
+pub mod predict;
 pub mod prompts;
 pub mod render;

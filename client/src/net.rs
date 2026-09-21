@@ -7,6 +7,8 @@ use common::types::{PlayerId, Tick};
 use std::fmt;
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +77,28 @@ pub fn retry_delays_ms(base_delay_ms: u64, attempts: u32) -> Vec<u64> {
 
 pub fn connect(address: SocketAddr, name: &str) -> Result<Connection, HandshakeError> {
     connect_with_options(address, name, HandshakeOptions::default())
+}
+
+pub fn send_message(socket: &UdpSocket, message: &ClientMsg) -> io::Result<()> {
+    let payload =
+        encode(message).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    socket.send(&payload).map(|_| ())
+}
+
+pub fn spawn_receiver(socket: &UdpSocket) -> io::Result<Receiver<ServerMsg>> {
+    let socket = socket.try_clone()?;
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut buffer = [0_u8; MAX_PAYLOAD_BYTES];
+        while let Ok(length) = socket.recv(&mut buffer) {
+            if let Ok(message) = decode::<ServerMsg>(&buffer[..length])
+                && sender.send(message).is_err()
+            {
+                break;
+            }
+        }
+    });
+    Ok(receiver)
 }
 
 pub fn connect_with_options(
@@ -258,5 +282,35 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains(&unused.to_string()));
         assert!(text.contains("2 attempts"));
+    }
+
+    #[test]
+    fn connected_socket_sends_while_receiver_clone_forwards_messages() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.connect(server.local_addr().unwrap()).unwrap();
+        let incoming = spawn_receiver(&client).unwrap();
+
+        send_message(&client, &ClientMsg::Leave).unwrap();
+        let mut buffer = [0_u8; MAX_PAYLOAD_BYTES];
+        let (length, peer) = server.recv_from(&mut buffer).unwrap();
+        assert_eq!(
+            decode::<ClientMsg>(&buffer[..length]).unwrap(),
+            ClientMsg::Leave
+        );
+
+        let pong = ServerMsg::Pong {
+            nonce: 9,
+            server_tick: 10,
+            server_time_ms: 500,
+        };
+        server.send_to(&encode(&pong).unwrap(), peer).unwrap();
+        assert_eq!(
+            incoming.recv_timeout(Duration::from_millis(100)).unwrap(),
+            pong
+        );
     }
 }

@@ -1,12 +1,15 @@
 use client::fps::FpsMeter;
 use client::maze::build_and_validate;
-use client::net::{Connection, connect};
+use client::net::{Connection, connect, send_message, spawn_receiver};
+use client::predict::Predictor;
 use client::prompts::{prompt_name, prompt_server_address};
 use client::render::raycast::{WallSide, cast_view};
 use common::maze::MazeData;
+use common::protocol::{ClientMsg, ServerMsg};
 use common::types::Vec2;
 use macroquad::prelude::*;
 use std::io::{self, Write};
+use std::sync::mpsc::Receiver;
 
 fn main() {
     if let Err(error) = start() {
@@ -28,7 +31,11 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
 
     let connection = connect(address, &name)?;
     let maze = build_and_validate(connection.welcome.maze.clone())?;
-    macroquad::Window::from_config(window_config(), run_window(connection, name, maze));
+    let incoming = spawn_receiver(&connection.socket)?;
+    macroquad::Window::from_config(
+        window_config(),
+        run_window(connection, incoming, name, maze),
+    );
     Ok(())
 }
 
@@ -42,10 +49,21 @@ fn window_config() -> Conf {
     }
 }
 
-async fn run_window(connection: Connection, name: String, maze: MazeData) {
+async fn run_window(
+    connection: Connection,
+    incoming: Receiver<ServerMsg>,
+    name: String,
+    maze: MazeData,
+) {
     let mut fps_meter = FpsMeter::default();
-    let camera_position = Vec2::new(0.5, 0.5);
+    let spawn_position = Vec2::new(
+        (maze.grid.width / 2) as f32 + 0.5,
+        (maze.grid.height / 2) as f32 + 0.5,
+    );
+    let mut predictor = Predictor::new(spawn_position);
+    let mut camera_correction = Vec2::ZERO;
     let mut camera_angle = 0.0_f32;
+    let mut network_error: Option<String> = None;
     const FIELD_OF_VIEW: f32 = std::f32::consts::FRAC_PI_3;
     const TURN_SPEED: f32 = 1.8;
 
@@ -59,6 +77,48 @@ async fn run_window(connection: Connection, name: String, maze: MazeData) {
             camera_angle += TURN_SPEED * frame_time;
         }
 
+        let forward = (is_key_down(KeyCode::W) || is_key_down(KeyCode::Up)) as u8 as f32
+            - (is_key_down(KeyCode::S) || is_key_down(KeyCode::Down)) as u8 as f32;
+        let move_dir = Vec2::new(camera_angle.cos() * forward, camera_angle.sin() * forward);
+        for input in predictor.advance_frame(frame_time, move_dir, camera_angle, false, &maze.grid)
+        {
+            let message = ClientMsg::Input {
+                input_tick: input.input_tick,
+                move_dir: input.move_dir,
+                facing: input.facing,
+                shoot: input.shoot,
+            };
+            if let Err(error) = send_message(&connection.socket, &message) {
+                network_error = Some(error.to_string());
+            }
+        }
+
+        while let Ok(message) = incoming.try_recv() {
+            if let ServerMsg::WorldState {
+                level_epoch,
+                players,
+                ..
+            } = message
+                && level_epoch == connection.welcome.level_epoch
+                && let Some(player) = players
+                    .iter()
+                    .find(|player| player.id == connection.welcome.player_id)
+            {
+                let correction =
+                    predictor.reconcile(player.pos, player.last_input_tick, &maze.grid);
+                camera_correction.x -= correction.x;
+                camera_correction.y -= correction.y;
+            }
+        }
+
+        let correction_decay = (-12.0 * frame_time).exp();
+        camera_correction.x *= correction_decay;
+        camera_correction.y *= correction_decay;
+        let predicted = predictor.position();
+        let camera_position = Vec2::new(
+            predicted.x + camera_correction.x,
+            predicted.y + camera_correction.y,
+        );
         draw_maze_view(&maze, camera_position, camera_angle, FIELD_OF_VIEW);
 
         draw_text(
@@ -79,12 +139,15 @@ async fn run_window(connection: Connection, name: String, maze: MazeData) {
             YELLOW,
         );
         draw_text(
-            "Look: Left/Right or A/D",
+            "Move: W/S or Up/Down   Look: A/D or Left/Right",
             24.0,
             screen_height() - 24.0,
             22.0,
             LIGHTGRAY,
         );
+        if let Some(error) = &network_error {
+            draw_text(format!("Network error: {error}"), 24.0, 104.0, 22.0, RED);
+        }
 
         next_frame().await;
     }
