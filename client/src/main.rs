@@ -1,8 +1,10 @@
 use client::fps::FpsMeter;
 use client::maze::build_and_validate;
 use client::net::{Connection, connect, send_message, spawn_receiver};
+use client::players::RemotePlayers;
 use client::predict::Predictor;
 use client::prompts::{prompt_name, prompt_server_address};
+use client::render::minimap::{MinimapRect, draw_minimap};
 use client::render::raycast::{WallSide, cast_view};
 use common::maze::MazeData;
 use common::protocol::{ClientMsg, ServerMsg};
@@ -63,6 +65,7 @@ async fn run_window(
     let mut predictor = Predictor::new(spawn_position);
     let mut camera_correction = Vec2::ZERO;
     let mut camera_angle = 0.0_f32;
+    let mut remote_players = RemotePlayers::default();
     let mut network_error: Option<String> = None;
     const FIELD_OF_VIEW: f32 = std::f32::consts::FRAC_PI_3;
     const TURN_SPEED: f32 = 1.8;
@@ -94,20 +97,36 @@ async fn run_window(
         }
 
         while let Ok(message) = incoming.try_recv() {
-            if let ServerMsg::WorldState {
-                level_epoch,
-                players,
-                ..
-            } = message
-                && level_epoch == connection.welcome.level_epoch
-                && let Some(player) = players
-                    .iter()
-                    .find(|player| player.id == connection.welcome.player_id)
-            {
-                let correction =
-                    predictor.reconcile(player.pos, player.last_input_tick, &maze.grid);
-                camera_correction.x -= correction.x;
-                camera_correction.y -= correction.y;
+            match message {
+                ServerMsg::WorldState {
+                    level_epoch,
+                    players,
+                    ..
+                } if level_epoch == connection.welcome.level_epoch => {
+                    let now_ms = (get_time() * 1000.0) as u64;
+                    remote_players.apply_snapshot(connection.welcome.player_id, &players, now_ms);
+                    if let Some(player) = players
+                        .iter()
+                        .find(|player| player.id == connection.welcome.player_id)
+                    {
+                        let correction =
+                            predictor.reconcile(player.pos, player.last_input_tick, &maze.grid);
+                        camera_correction.x -= correction.x;
+                        camera_correction.y -= correction.y;
+                    }
+                }
+                ServerMsg::Event { event_id, kind } => {
+                    remote_players.apply_event(&kind);
+                    if let Err(error) =
+                        send_message(&connection.socket, &ClientMsg::Ack { event_id })
+                    {
+                        network_error = Some(error.to_string());
+                    }
+                }
+                ServerMsg::Welcome { .. }
+                | ServerMsg::Rejected { .. }
+                | ServerMsg::WorldState { .. }
+                | ServerMsg::Pong { .. } => {}
             }
         }
 
@@ -120,6 +139,21 @@ async fn run_window(
             predicted.y + camera_correction.y,
         );
         draw_maze_view(&maze, camera_position, camera_angle, FIELD_OF_VIEW);
+        let minimap_scale = 220.0 / (maze.grid.width.max(maze.grid.height) as f32);
+        let minimap = MinimapRect {
+            width: maze.grid.width as f32 * minimap_scale,
+            height: maze.grid.height as f32 * minimap_scale,
+            x: screen_width() - maze.grid.width as f32 * minimap_scale - 20.0,
+            y: 20.0,
+        };
+        let remote_positions: Vec<Vec2> = remote_players.iter().map(|player| player.pos).collect();
+        draw_minimap(
+            &maze.grid,
+            predicted,
+            camera_angle,
+            &remote_positions,
+            minimap,
+        );
 
         draw_text(
             format!(

@@ -998,7 +998,35 @@ Coordination note: client prediction uses radius `0.25`, matching
 the frozen `common` API; promote it to the shared contract on `develop` if the
 value ever changes so the two tracks cannot drift.
 
-Remaining Milestone 10 gate: run with the real server and confirm W/S movement
-responds immediately, stops at walls, slides along corners, and does not show
-visible reconciliation snapping. Artificial-latency behavior remains an
-explicit re-check once Milestone 13's latency tool exists.
+2026-09-21: Milestone 10 complete. The team tested the real client/server
+build and confirmed forward/backward movement and rotation work, movement is
+immediate, collision and wall sliding behave correctly, the camera shows no
+obvious reconciliation snapping, and FPS remains stable. Artificial-latency
+behavior remains an explicit re-check once Milestone 13's latency tool exists.
+
+2026-09-21: Milestone 11 automated portion complete on `client-track`. Added
+`client::render::minimap` with a pure world-to-screen mapping tested against
+hand-calculated coordinates and orientation endpoints. The live minimap draws
+walls directly from the same `MazeGrid` bitflags as collision and raycasting,
+preserves the maze aspect ratio, shows self as a yellow marker with facing
+direction, and shows remote snapshot positions as red markers.
+
+Added `RemotePlayers`, which treats each `WorldState` as authoritative
+membership reconciliation rather than depending on reliable events alone. An
+unknown snapshot id is created with a `Player <id>` placeholder, a late
+`PlayerJoined` event replaces that name, `PlayerLeft` removes it immediately,
+and absence beyond `GHOST_TIMEOUT_MS` removes a ghost even if the leave event
+never arrives. Self is deliberately excluded from the remote registry.
+Processed `ServerMsg::Event` messages are now acknowledged through the same
+connected UDP socket so the server's reliability layer stops retrying them.
+
+TDD evidence: coordinate mapping/orientation and the missing-join/missing-leave
+membership paths were written red before implementation. `cargo test
+--workspace` passes 54 tests total (27 client + 27 common). Client-only
+`rustfmt --check`, client Clippy with warnings denied, `RUSTFLAGS='-D warnings'
+cargo build --workspace`, and `git diff --check` pass.
+
+Remaining Milestone 11 gate: run two real clients together. Each must show the
+other as a red minimap marker, and moving either client must update its marker
+on both minimaps. Do not mark Milestone 11 complete until that audit-equivalent
+two-client check passes.
