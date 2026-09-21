@@ -1057,6 +1057,35 @@ Gate: `cargo clean && cargo build --workspace` — zero warnings, including
 under `RUSTFLAGS="-D warnings"`. `cargo test --workspace` — 39/39 green
 (27 common + 6 lifecycle + 6 tick_loop).
 
+2026-09-21: Milestone 8 automated portion complete on `client-track`.
+Implemented the required terminal startup sequence as independently testable
+prompt functions: invalid socket addresses, empty names, and names over the
+24-character client limit produce a clear explanation and re-prompt rather
+than panicking. The executable prints `Starting...` only after both inputs are
+valid.
+
+Added the UDP join handshake with the shared `PROTOCOL_VERSION`,
+`GENERATOR_VERSION`, `JOIN_RETRY_BASE_MS`, and `JOIN_MAX_ATTEMPTS` constants.
+The client retains the same connected `UdpSocket` after `Welcome` so later
+gameplay traffic keeps the transport identity the server assigned. Tests use
+a real loopback scripted responder and cover success after two dropped joins,
+immediate final `Rejected` handling, exhausted-attempt diagnostics, and the
+production exponential schedule `[250, 500, 1000, 2000, 4000, 8000]` ms.
+Test-only options shorten the real waits without changing production policy.
+
+Added a bounded rolling-average FPS meter (60-frame production window from
+`FPS_AVG_WINDOW_FRAMES`) and a post-handshake Macroquad window showing the
+connected player id and live FPS. Macroquad is started explicitly after the
+handshake instead of through its usual entry-point attribute, because that
+attribute would create the GUI before the required CLI/connect sequence.
+
+TDD evidence: each FPS, handshake, and prompt slice was first observed red
+against its missing implementation, then made green. `cargo test --workspace`
+passes 36 tests total (9 client + 27 common); `RUSTFLAGS='-D warnings' cargo
+build --workspace` is clean. Client-only `rustfmt --check` and `git diff
+--check` pass. Workspace-wide formatting was deliberately not applied because
+it would rewrite frozen `common/` files on the client-owned branch.
+
 2026-09-21: Rendezvous point 1 (CLIENT_TRACK_HANDOFF.md) confirmed, doubling
 as Milestone 8's own manual gate. `client-track` at `6df5201` (Milestone 8:
 CLI prompts, handshake retry/backoff, fps window) connected a real
@@ -1081,3 +1110,169 @@ picking one side.
 
 Nothing in `common/` changed on either side for this checkpoint, so no
 rebase was required beyond having both branches reasonably current.
+2026-09-21: Milestone 8 complete. The team ran the real `client-track` client
+against the Milestone 7 `server-track` binary and confirmed the end-to-end
+handshake succeeds, the GUI opens after `Welcome`, and the live FPS display
+updates. This closes the manual rendezvous gate. Milestone 9 (client DDA
+raycasting against the maze received in `Welcome`) is now the next ready item.
+
+2026-09-21: Milestone 9 automated portion complete on `client-track`. Added
+`client::maze::build_and_validate`: generated sources are deterministically
+rebuilt from their `MazeSpec`, custom grids are retained directly, and both
+paths validate dimensions, known wall bits, closed borders, mirrored interior
+walls, no isolated cells, and full connectivity before the GUI opens. Invalid
+geometry now fails with a specific client error instead of reaching rendering.
+
+Added `client::render::raycast`, a pure grid-DDA raycaster. It advances from
+cell boundary to cell boundary, checking the current cell's directional wall
+bit, and returns wall distance plus vertical/horizontal face orientation.
+Tests use hand-built 3x3 grids and hand-calculated east, west, and north hit
+distances, a bounded-range miss, and a 30-degree projection case proving the
+perpendicular-distance correction removes fisheye distortion.
+
+The Macroquad client now casts one ray per screen column against the validated
+maze received in `Welcome`, projects corrected depth into flat-shaded vertical
+wall strips, shades horizontal and vertical faces differently, and permits
+left/right viewing with arrow keys or A/D. Position remains fixed by design;
+movement and prediction begin in Milestone 10.
+
+TDD evidence: the DDA API and fisheye correction were each observed failing
+before implementation. `cargo test --workspace` passes 45 tests total (18
+client + 27 common). Client-only `rustfmt --check`, client Clippy with warnings
+denied, `RUSTFLAGS='-D warnings' cargo build --workspace`, and `git diff
+--check` all pass.
+
+2026-09-21: Milestone 9 complete. The team ran the renderer against the real
+server maze, confirmed walls were visible and the camera rotated correctly
+with A/D, and accepted the visual rendering gate. Traversal was intentionally
+not part of this milestone; fixed-step movement and collision begin in
+Milestone 10 so rendering and movement failures remain independently testable.
+
+2026-09-21: Milestone 10 automated portion complete on `client-track`. Added a
+pure `Predictor` that accumulates rendered-frame time and emits exactly one
+numbered input for each whole `INPUT_DT_MS`. Every emitted input immediately
+advances local position through the shared `common::sim::resolve_move` using
+the server-owned speed, then enters a bounded history sized from
+`CLIENT_INPUT_HZ * MAX_RTT_S`.
+
+Reconciliation looks up the history entry matching
+`PlayerSnapshot.last_input_tick`, never the newest prediction. If that older
+prediction agrees with the authoritative position, acknowledged entries are
+discarded without moving the current prediction. On divergence, prediction
+resets to the authoritative position and replays every newer input. The GUI
+maintains a separately decaying correction offset so an actual correction is
+visually blended while normal locally predicted movement remains immediate.
+
+W/S or Up/Down now produce forward/backward movement relative to facing;
+A/D or Left/Right rotate. The camera and server input both advance on the same
+fixed steps, and rendering reads the predicted position. The UDP connection is
+split by cloning the already-connected socket: the original sends inputs while
+a dedicated blocking receive thread decodes server messages into a channel
+that the render loop drains with `try_recv`. Snapshots from a different
+`level_epoch` are ignored.
+
+TDD evidence: immediate local movement, 30-vs-120-fps equivalence over one
+second, and zero correction when an older acknowledged prediction matches were
+written red first. The exact-step test exposed an f32/f64 boundary mismatch
+that initially emitted zero inputs and was fixed by computing the fixed step
+with the shared f32 expression before promotion. A real loopback UDP test also
+proves sending and receiving through the cloned socket preserve one connected
+transport identity.
+
+Verification: `cargo test --workspace` passes 49 tests total (22 client + 27
+common). Client-only `rustfmt --check`, client Clippy with warnings denied,
+`RUSTFLAGS='-D warnings' cargo build --workspace`, and `git diff --check` pass.
+
+Coordination note: client prediction uses radius `0.25`, matching
+`server::world::PLAYER_RADIUS`. That radius is server-local rather than part of
+the frozen `common` API; promote it to the shared contract on `develop` if the
+value ever changes so the two tracks cannot drift.
+
+2026-09-21: Milestone 10 complete. The team tested the real client/server
+build and confirmed forward/backward movement and rotation work, movement is
+immediate, collision and wall sliding behave correctly, the camera shows no
+obvious reconciliation snapping, and FPS remains stable. Artificial-latency
+behavior remains an explicit re-check once Milestone 13's latency tool exists.
+
+2026-09-21: Milestone 11 automated portion complete on `client-track`. Added
+`client::render::minimap` with a pure world-to-screen mapping tested against
+hand-calculated coordinates and orientation endpoints. The live minimap draws
+walls directly from the same `MazeGrid` bitflags as collision and raycasting,
+preserves the maze aspect ratio, shows self as a yellow marker with facing
+direction, and shows remote snapshot positions as red markers.
+
+Added `RemotePlayers`, which treats each `WorldState` as authoritative
+membership reconciliation rather than depending on reliable events alone. An
+unknown snapshot id is created with a `Player <id>` placeholder, a late
+`PlayerJoined` event replaces that name, `PlayerLeft` removes it immediately,
+and absence beyond `GHOST_TIMEOUT_MS` removes a ghost even if the leave event
+never arrives. Self is deliberately excluded from the remote registry.
+Processed `ServerMsg::Event` messages are now acknowledged through the same
+connected UDP socket so the server's reliability layer stops retrying them.
+
+TDD evidence: coordinate mapping/orientation and the missing-join/missing-leave
+membership paths were written red before implementation. `cargo test
+--workspace` passes 54 tests total (27 client + 27 common). Client-only
+`rustfmt --check`, client Clippy with warnings denied, `RUSTFLAGS='-D warnings'
+cargo build --workspace`, and `git diff --check` pass.
+
+2026-09-21: Milestone 11 complete. The team ran the two-client audit check and
+confirmed each client shows itself and the other player on the minimap, remote
+markers update as either player moves, and disconnected players disappear.
+
+2026-09-21: Milestone 12 automated portion complete on `client-track`. Added a
+bounded, time-sorted `SnapshotBuffer` per remote player. It interpolates
+position and shortest-arc facing between bracketing snapshots, extrapolates
+velocity only through `MAX_EXTRAPOLATION_MS`, then holds the latest known state
+instead of guessing indefinitely. The buffer retains `SNAPSHOT_BUFFER_LEN`
+(5) entries, which tests prove brackets the 100 ms delayed render target at the
+30 Hz server rate.
+
+Added `ClockSync` driven by one-second `Ping`/matching `Pong` samples. Offset is
+selected from the recent sample with the lowest RTT so a badly delayed Pong
+cannot drag the render timeline away from buffered snapshots. `Welcome`
+provides the initial zero-RTT clock anchor before the first Pong. Snapshot ticks
+are converted relative to the latest `(server_tick, server_time_ms)` anchor;
+time arithmetic uses `f64` because epoch-sized millisecond values lose usable
+precision in `f32`.
+
+Remote minimap markers now render at estimated server time minus
+`INTERP_DELAY_MS`, rather than at their latest raw 30 Hz snapshot. Snapshot
+insertion tolerates UDP reordering. A red test for a snapshot tick slightly
+older than the newest Pong anchor exposed unsigned wraparound (billions of
+ticks into the future); the conversion now interprets the wrapping delta as
+signed, and both forward and backward anchor cases pass.
+
+TDD evidence covers interpolation, bounded extrapolation then hold, configured
+buffer length taking the interpolation branch, shortest-path angle wrapping,
+clock outlier rejection, and tick-to-server-time anchoring. `cargo test
+--workspace` passes 60 tests total (33 client + 27 common). Client-only
+`rustfmt --check`, client Clippy with warnings denied, `RUSTFLAGS='-D warnings'
+cargo build --workspace`, and `git diff --check` pass.
+
+Remaining Milestone 12 gates: with two real clients, confirm the moving remote
+marker is smooth rather than stepping at 30 Hz; then artificially delay one
+client's receive path and confirm motion degrades reasonably without violent
+jumps. Do not mark Milestone 12 complete until both visual checks pass.
+
+2026-09-21: `client-track` (through Milestone 12) and `server-track`
+(through Milestone 7) merged into `develop` ahead of the mandatory
+Milestones 13/14 integration sync (`CLIENT_TRACK_HANDOFF.md` rendezvous
+point 2). Merge was clean except for this file, whose running log had
+diverged in structure since the Milestone 8 checkpoint (see the "known
+merge hazard" note above) — resolved by interleaving both branches'
+entries in milestone/chronological order rather than picking one side;
+no entry was dropped.
+
+**Open item carried over, not yet closed**: `client-track`'s own last
+log entry above says explicitly not to mark Milestone 12 complete until
+two visual checks both pass — remote-player smoothness with real
+clients, AND a degraded/artificially-delayed connection still moving
+reasonably rather than jumpily. Only the first was actually verified
+(multiple real clients, including a third connected as `patou` from a
+worktree, all visible on each other's minimaps with smooth movement).
+The artificial-latency/degraded-connection check was never done. Do
+this before treating Milestone 12 as fully closed — it's cheap (throttle
+one client's socket read rate or add a small sleep in its recv path per
+Architecture §6.4's own suggestion) and it's the one case most likely to
+reveal a bug the happy-path check can't.
