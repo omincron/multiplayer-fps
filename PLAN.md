@@ -925,3 +925,34 @@ against the Milestone 7 `server-track` binary and confirmed the end-to-end
 handshake succeeds, the GUI opens after `Welcome`, and the live FPS display
 updates. This closes the manual rendezvous gate. Milestone 9 (client DDA
 raycasting against the maze received in `Welcome`) is now the next ready item.
+
+2026-09-21: Milestone 9 automated portion complete on `client-track`. Added
+`client::maze::build_and_validate`: generated sources are deterministically
+rebuilt from their `MazeSpec`, custom grids are retained directly, and both
+paths validate dimensions, known wall bits, closed borders, mirrored interior
+walls, no isolated cells, and full connectivity before the GUI opens. Invalid
+geometry now fails with a specific client error instead of reaching rendering.
+
+Added `client::render::raycast`, a pure grid-DDA raycaster. It advances from
+cell boundary to cell boundary, checking the current cell's directional wall
+bit, and returns wall distance plus vertical/horizontal face orientation.
+Tests use hand-built 3x3 grids and hand-calculated east, west, and north hit
+distances, a bounded-range miss, and a 30-degree projection case proving the
+perpendicular-distance correction removes fisheye distortion.
+
+The Macroquad client now casts one ray per screen column against the validated
+maze received in `Welcome`, projects corrected depth into flat-shaded vertical
+wall strips, shades horizontal and vertical faces differently, and permits
+left/right viewing with arrow keys or A/D. Position remains fixed by design;
+movement and prediction begin in Milestone 10.
+
+TDD evidence: the DDA API and fisheye correction were each observed failing
+before implementation. `cargo test --workspace` passes 45 tests total (18
+client + 27 common). Client-only `rustfmt --check`, client Clippy with warnings
+denied, `RUSTFLAGS='-D warnings' cargo build --workspace`, and `git diff
+--check` all pass.
+
+Remaining Milestone 9 gate: run against the real server and visually rotate
+through the received maze, confirming sensible wall distances/angles, aligned
+geometry, and no visible fisheye curvature. Do not mark Milestone 9 complete
+until that visual check passes.
