@@ -1056,3 +1056,28 @@ Latest: `clients=10 target_hz=30 achieved_hz=30.76 ticks=302 secs=9.82`.
 Gate: `cargo clean && cargo build --workspace` — zero warnings, including
 under `RUSTFLAGS="-D warnings"`. `cargo test --workspace` — 39/39 green
 (27 common + 6 lifecycle + 6 tick_loop).
+
+2026-09-21: Rendezvous point 1 (CLIENT_TRACK_HANDOFF.md) confirmed, doubling
+as Milestone 8's own manual gate. `client-track` at `6df5201` (Milestone 8:
+CLI prompts, handshake retry/backoff, fps window) connected a real
+`cargo run -p client` on a macOS machine to a real `cargo run -p server`
+(`server-track`, Milestone 7 HEAD) on a separate Ubuntu machine, both on the
+same wifi network — a genuine two-machine test, not loopback. Server bound
+`0.0.0.0:7777`; client pointed at the Ubuntu box's LAN IP (found via
+`hostname -I`, filtering out the `172.17.0.1`/`172.18.0.1` Docker bridge
+addresses also listed — only the real wifi-interface address is reachable
+from another machine on the network). Result: window opened showing
+`Connected as <name> (player <id>)` and a live-updating FPS counter, i.e. a
+real `Welcome` round-tripped over UDP across two machines.
+
+**Known merge hazard for whoever does the client-track/server-track merge**:
+`client-track` forked from the `common::config::Config` commit (before
+Milestones 6/7's log entries existed) and appended its own Milestone 8 entry
+right after that point — so `PLAN.md`'s running log has diverged structure
+between the two branches and will produce a real merge conflict on this
+file (not just a formatting nuisance) the first time they're merged. Resolve
+by keeping both branches' entries, ordered by milestone/date, not by
+picking one side.
+
+Nothing in `common/` changed on either side for this checkpoint, so no
+rebase was required beyond having both branches reasonably current.
