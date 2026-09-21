@@ -316,6 +316,17 @@ impl World {
         });
         self.spawn_pos = grid_center_spawn(&self.maze);
 
+        // Same visibility requirement as the startup maze (`net::spawn`'s
+        // own log line) — ARCHITECTURE.md §7.1.
+        let seed = match &self.maze.source {
+            common::maze::MazeSource::Generated(spec) => spec.seed,
+            common::maze::MazeSource::Custom(_) => 0,
+        };
+        println!(
+            "maze_wars server: level {} \"{}\" ({}x{}) — generator={} seed={}",
+            self.level, level.name, level.grid_w, level.grid_h, self.maze.generator_name, seed
+        );
+
         for player in self.players.values_mut() {
             player.pos = self.spawn_pos;
             player.input_queue.clear();

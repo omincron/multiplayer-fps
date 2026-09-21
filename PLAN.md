@@ -1619,3 +1619,23 @@ feed, level progression, and load/soak validation are all built, tested,
 and manually verified end to end. Remaining work is Milestone 16+ bonus
 features only (§7: AI bots as a real feature, maze editor, host-history
 launcher — procedural levels already satisfied by Milestone 14).
+
+2026-09-21: Closed a real gap in the procedural-levels bonus (§7.1):
+generation itself has worked since Milestone 1, but the generator
+name/seed was never actually surfaced anywhere — §7.1's own bar for this
+bonus to count is that it's "unambiguous during grading that generation
+is algorithmic," not just that the maze changes. `net::spawn` now prints
+the startup maze's level name, size, generator name, and seed to the
+server console; `World::maybe_advance_level` prints the same on every
+level transition. The client HUD also shows a "Maze: <generator> (seed
+<seed>)" line (`main.rs`'s new `maze_provenance_line`), reading straight
+from `level_state.maze()` — the client already has this data locally
+(it regenerates the maze itself from the same `MazeSpec`, §5.1), so no
+protocol change was needed, just displaying what was already there.
+
+Manually verified: server console prints `maze_wars server: level 0
+"Novice Maze" (20x20) — generator=recursive-backtracker+braid
+seed=<n>` on startup; a real client connects without incident with the
+new HUD line drawn. `cargo test --workspace` 85/85 (routine run, soak
+test still `#[ignore]`d) green, `cargo clean && cargo build --workspace`
+zero warnings.
