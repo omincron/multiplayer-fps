@@ -890,3 +890,37 @@ doesn't need it yet but was fast-forwarded too since it hadn't diverged.
 Gate: `cargo clean && cargo build --workspace` — zero warnings. `cargo test
 -p common` — 27/27 green (7 maze + 5 protocol + 5 reliability + 9 sim + 1
 config).
+
+2026-09-21: Milestone 8 automated portion complete on `client-track`.
+Implemented the required terminal startup sequence as independently testable
+prompt functions: invalid socket addresses, empty names, and names over the
+24-character client limit produce a clear explanation and re-prompt rather
+than panicking. The executable prints `Starting...` only after both inputs are
+valid.
+
+Added the UDP join handshake with the shared `PROTOCOL_VERSION`,
+`GENERATOR_VERSION`, `JOIN_RETRY_BASE_MS`, and `JOIN_MAX_ATTEMPTS` constants.
+The client retains the same connected `UdpSocket` after `Welcome` so later
+gameplay traffic keeps the transport identity the server assigned. Tests use
+a real loopback scripted responder and cover success after two dropped joins,
+immediate final `Rejected` handling, exhausted-attempt diagnostics, and the
+production exponential schedule `[250, 500, 1000, 2000, 4000, 8000]` ms.
+Test-only options shorten the real waits without changing production policy.
+
+Added a bounded rolling-average FPS meter (60-frame production window from
+`FPS_AVG_WINDOW_FRAMES`) and a post-handshake Macroquad window showing the
+connected player id and live FPS. Macroquad is started explicitly after the
+handshake instead of through its usual entry-point attribute, because that
+attribute would create the GUI before the required CLI/connect sequence.
+
+TDD evidence: each FPS, handshake, and prompt slice was first observed red
+against its missing implementation, then made green. `cargo test --workspace`
+passes 36 tests total (9 client + 27 common); `RUSTFLAGS='-D warnings' cargo
+build --workspace` is clean. Client-only `rustfmt --check` and `git diff
+--check` pass. Workspace-wide formatting was deliberately not applied because
+it would rewrite frozen `common/` files on the client-owned branch.
+
+Remaining Milestone 8 gate: run this client against the real `server-track`
+Milestone 7 binary and visually confirm that a successful handshake opens the
+window and the FPS number updates. Do not mark Milestone 8 fully complete until
+that rendezvous check passes.
