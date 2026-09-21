@@ -920,7 +920,8 @@ build --workspace` is clean. Client-only `rustfmt --check` and `git diff
 --check` pass. Workspace-wide formatting was deliberately not applied because
 it would rewrite frozen `common/` files on the client-owned branch.
 
-Remaining Milestone 8 gate: run this client against the real `server-track`
-Milestone 7 binary and visually confirm that a successful handshake opens the
-window and the FPS number updates. Do not mark Milestone 8 fully complete until
-that rendezvous check passes.
+2026-09-21: Milestone 8 complete. The team ran the real `client-track` client
+against the Milestone 7 `server-track` binary and confirmed the end-to-end
+handshake succeeds, the GUI opens after `Welcome`, and the live FPS display
+updates. This closes the manual rendezvous gate. Milestone 9 (client DDA
+raycasting against the maze received in `Welcome`) is now the next ready item.
