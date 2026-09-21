@@ -53,6 +53,14 @@ impl SnapshotBuffer {
         self.snapshots.is_empty()
     }
 
+    /// Drops all buffered snapshots. Used on `Respawned` (Milestone 13): a
+    /// respawn is a teleport, not movement, so interpolating from the
+    /// pre-respawn snapshots to the new position would render a visible
+    /// slide across the map instead of an instant pop.
+    pub fn clear(&mut self) {
+        self.snapshots.clear();
+    }
+
     pub fn sample(&self, target_server_time_ms: f64) -> Option<SampledState> {
         let first = *self.snapshots.first()?;
         if target_server_time_ms < first.server_time_ms {

@@ -1,5 +1,6 @@
 use client::fps::FpsMeter;
 use client::interp::{ClockSync, tick_to_server_time_ms};
+use client::killfeed::KillFeed;
 use client::maze::build_and_validate;
 use client::net::{Connection, connect, send_message, spawn_receiver};
 use client::players::RemotePlayers;
@@ -7,10 +8,10 @@ use client::predict::Predictor;
 use client::prompts::{prompt_name, prompt_server_address};
 use client::render::minimap::{MinimapRect, draw_minimap};
 use client::render::raycast::{WallSide, cast_view};
-use common::config::INTERP_DELAY_MS;
+use common::config::{INTERP_DELAY_MS, MAX_HP};
 use common::maze::MazeData;
-use common::protocol::{ClientMsg, ServerMsg};
-use common::types::Vec2;
+use common::protocol::{ClientMsg, EventKind, ServerMsg};
+use common::types::{PlayerId, Vec2};
 use macroquad::prelude::*;
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -69,6 +70,8 @@ async fn run_window(
     let mut camera_correction = Vec2::ZERO;
     let mut camera_angle = 0.0_f32;
     let mut remote_players = RemotePlayers::default();
+    let mut own_hp: u8 = MAX_HP;
+    let mut kill_feed = KillFeed::default();
     let initial_local_time_ms = get_time() * 1000.0;
     let mut clock = ClockSync::default();
     clock.observe_pong(
@@ -111,7 +114,13 @@ async fn run_window(
         let forward = (is_key_down(KeyCode::W) || is_key_down(KeyCode::Up)) as u8 as f32
             - (is_key_down(KeyCode::S) || is_key_down(KeyCode::Down)) as u8 as f32;
         let move_dir = Vec2::new(camera_angle.cos() * forward, camera_angle.sin() * forward);
-        for input in predictor.advance_frame(frame_time, move_dir, camera_angle, false, &maze.grid)
+        // Edge-triggered (fires once per press, not once per frame held) —
+        // semi-auto, one shot per click/press, matching the hitscan model
+        // (Architecture §4.3): a shot is a discrete event, not a rate to
+        // sustain like movement.
+        let shoot = is_key_pressed(KeyCode::Space) || is_mouse_button_pressed(MouseButton::Left);
+        for input in
+            predictor.advance_frame(frame_time, move_dir, camera_angle, shoot, &maze.grid)
         {
             let message = ClientMsg::Input {
                 input_tick: input.input_tick,
@@ -143,6 +152,7 @@ async fn run_window(
                         .iter()
                         .find(|player| player.id == connection.welcome.player_id)
                     {
+                        own_hp = player.hp;
                         let correction =
                             predictor.reconcile(player.pos, player.last_input_tick, &maze.grid);
                         camera_correction.x -= correction.x;
@@ -151,6 +161,41 @@ async fn run_window(
                 }
                 ServerMsg::Event { event_id, kind } => {
                     remote_players.apply_event(&kind);
+                    match &kind {
+                        // Self-respawn: `RemotePlayers` never tracks self
+                        // (it filters `self_id` out of every snapshot), so
+                        // this has to be handled here rather than inside
+                        // `apply_event`.
+                        EventKind::Respawned { id, pos }
+                            if *id == connection.welcome.player_id =>
+                        {
+                            predictor.respawn_to(*pos);
+                            camera_correction = Vec2::ZERO;
+                            own_hp = MAX_HP;
+                        }
+                        EventKind::Killed { victim, killer } => {
+                            let self_id = connection.welcome.player_id;
+                            let message = if *killer == self_id {
+                                format!(
+                                    "You eliminated {}",
+                                    player_label(*victim, self_id, &name, &remote_players)
+                                )
+                            } else if *victim == self_id {
+                                format!(
+                                    "{} eliminated you",
+                                    player_label(*killer, self_id, &name, &remote_players)
+                                )
+                            } else {
+                                format!(
+                                    "{} eliminated {}",
+                                    player_label(*killer, self_id, &name, &remote_players),
+                                    player_label(*victim, self_id, &name, &remote_players)
+                                )
+                            };
+                            kill_feed.push(message, local_now_ms);
+                        }
+                        _ => {}
+                    }
                     if let Err(error) =
                         send_message(&connection.socket, &ClientMsg::Ack { event_id })
                     {
@@ -223,17 +268,42 @@ async fn run_window(
             YELLOW,
         );
         draw_text(
-            "Move: W/S or Up/Down   Look: A/D or Left/Right",
+            "Move: W/S or Up/Down   Look: A/D or Left/Right   Shoot: Space/Click",
             24.0,
             screen_height() - 24.0,
             22.0,
             LIGHTGRAY,
         );
+        draw_text(
+            format!("HP: {own_hp}"),
+            24.0,
+            104.0,
+            28.0,
+            if own_hp <= MAX_HP / 4 { RED } else { GREEN },
+        );
+        let feed_lines: Vec<&str> = kill_feed.visible(local_now_ms).collect();
+        for (row, line) in feed_lines.iter().enumerate() {
+            draw_text(line, 24.0, 138.0 + row as f32 * 26.0, 22.0, ORANGE);
+        }
         if let Some(error) = &network_error {
-            draw_text(format!("Network error: {error}"), 24.0, 104.0, 22.0, RED);
+            let y = 138.0 + feed_lines.len() as f32 * 26.0;
+            draw_text(format!("Network error: {error}"), 24.0, y, 22.0, RED);
         }
 
         next_frame().await;
+    }
+}
+
+/// A display name for `id`: the local player's own name for self, the
+/// known/placeholder remote name otherwise (Milestone 13 kill feed).
+fn player_label(id: PlayerId, self_id: PlayerId, self_name: &str, remote_players: &RemotePlayers) -> String {
+    if id == self_id {
+        self_name.to_string()
+    } else {
+        remote_players
+            .get(id)
+            .map(|player| player.name.clone())
+            .unwrap_or_else(|| format!("Player {id}"))
     }
 }
 

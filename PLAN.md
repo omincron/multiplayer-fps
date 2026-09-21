@@ -1350,3 +1350,68 @@ new needed there), react to `Hit`/`Killed`/`Respawned` events for the
 health display and kill feed, and the two of you should do the manual
 "shoot each other, confirm hp/kill feed update on both ends, respawn
 lands somewhere walkable" check together once that's wired up.
+
+2026-09-21: Milestone 13, client half complete (`client::main`, plus new
+`client::killfeed`), also on `develop` directly. Both halves of Milestone
+13 are now in.
+
+**Shoot input**: edge-triggered (`is_key_pressed(Space) ||
+is_mouse_button_pressed(Left)`), not held-down — a shot is a discrete
+hitscan event (§4.3), not a rate to sustain like movement, so semi-auto
+(one shot per press) is the correct mapping, not full-auto-while-held.
+Passed into `Predictor::advance_frame`'s existing (previously always-
+`false`) `shoot` parameter — that parameter already existed from
+Milestone 10 and only needed a real value plumbed in, not a signature
+change.
+
+**Health HUD**: `own_hp` is read *only* from `WorldState`'s own snapshot,
+deliberately not also patched from `Hit` events — the server is already
+the single source of truth (§4.3) and `WorldState` arrives every tick
+(33ms), so a second, separate update path from events would just be a
+redundant place for the two to disagree, for no perceptible latency win.
+
+**Kill feed** (new `client::killfeed::KillFeed`): a small bounded,
+expiring list, deliberately pure and dumb — it takes pre-formatted
+`String`s and a timestamp, and knows nothing about players, ids, or "you"
+vs. a name. Message formatting (which needs `RemotePlayers` + the local
+player's own name) lives in `main.rs`'s new `player_label` helper instead,
+keeping the module testable without a `RemotePlayers` fixture.
+
+**Respawn handling, two separate paths because `RemotePlayers` never
+tracks self** (it filters `self_id` out of every snapshot on the way in,
+per Milestone 11's design):
+- Self: `Predictor::respawn_to(pos)` (new method) snaps prediction to the
+  server-assigned spawn point and clears buffered input history, since
+  every buffered entry predicted a position from *before* the teleport.
+  `camera_correction` is also reset to zero in the same event handler —
+  without that, a stale in-flight correction from just before death would
+  keep decaying visibly across the teleport.
+- Remote: `RemotePlayers::apply_event`'s `Respawned` arm now sets the
+  player's `pos` directly *and* calls a new `SnapshotBuffer::clear()`
+  (`client::interp`). Clearing matters, not just updating `pos`: without
+  it, the interpolator would keep bracketing between the stale pre-death
+  snapshots and the new position and render a visible slide across the
+  map instead of an instant pop. `render_state`'s existing empty-buffer
+  fallback (`unwrap_or((self.pos, self.facing))`) is what makes the
+  now-current `pos` render immediately with no special-casing needed in
+  the render path itself.
+
+Tests: `killfeed.rs` (newest-first ordering, expiry window, capacity
+eviction — 3 tests), `predict.rs` (`respawn_to` snaps position and empties
+history — 1 test), `players.rs` (a `Respawned` event on a player with
+real prior snapshot history renders at the new position immediately,
+not something interpolated from the stale ones — 1 test, and this one
+would fail without the `clear()` call, not just without the `pos` update).
+
+`cargo test --workspace`: 78/78 green (38 client + 27 common + 6
+lifecycle + 1 shooting + 6 tick_loop). `cargo clean && cargo build
+--workspace` — zero warnings under `RUSTFLAGS="-D warnings"`.
+
+**What was and wasn't verified here**: a real server + two real client
+processes were run together for ~10 seconds (connect, idle) to confirm
+nothing panics with the new code paths active — process-alive and
+log-based, not a visual check. The actual gameplay gate from PLAN.md
+("shoot each other, confirm hp/kill feed update on both ends, respawn
+lands somewhere walkable") still needs a human at the keyboard — aiming
+and firing can't be driven or observed from here. That manual check is
+the next step, not yet done.

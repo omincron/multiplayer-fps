@@ -85,10 +85,16 @@ impl RemotePlayers {
                 self.players.remove(id);
                 self.known_names.remove(id);
             }
-            EventKind::Hit { .. }
-            | EventKind::Killed { .. }
-            | EventKind::Respawned { .. }
-            | EventKind::LevelChanged { .. } => {}
+            EventKind::Respawned { id, pos } => {
+                // Self-respawn is handled separately by the caller
+                // (`Predictor::respawn_to`) — this player, if present here
+                // at all, is a remote one.
+                if let Some(player) = self.players.get_mut(id) {
+                    player.pos = *pos;
+                    player.snapshots.clear();
+                }
+            }
+            EventKind::Hit { .. } | EventKind::Killed { .. } | EventKind::LevelChanged { .. } => {}
         }
     }
 
@@ -151,5 +157,28 @@ mod tests {
         assert!(players.get(9).is_some());
         players.apply_snapshot(1, &[], 300.0, 101 + GHOST_TIMEOUT_MS);
         assert!(players.get(9).is_none());
+    }
+
+    #[test]
+    fn respawned_event_snaps_a_remote_player_to_the_new_position_instead_of_sliding() {
+        let mut players = RemotePlayers::default();
+        // Two snapshots far from the eventual respawn point, so the
+        // interpolation buffer has real (stale) history to discard.
+        players.apply_snapshot(1, &[snapshot(9, 3.0)], 100.0, 100);
+        players.apply_snapshot(1, &[snapshot(9, 3.5)], 133.0, 100);
+
+        players.apply_event(&EventKind::Respawned {
+            id: 9,
+            pos: Vec2::new(40.0, 40.0),
+        });
+
+        let remote = players.get(9).unwrap();
+        assert_eq!(remote.pos, Vec2::new(40.0, 40.0));
+        // A query at a time between the old snapshots would previously have
+        // interpolated to somewhere around x=3.0-3.5 — asserting the render
+        // state directly is what would catch a fix that only updates `pos`
+        // but forgets to also clear the stale buffer.
+        let (rendered_pos, _) = remote.render_state(115.0);
+        assert_eq!(rendered_pos, Vec2::new(40.0, 40.0));
     }
 }

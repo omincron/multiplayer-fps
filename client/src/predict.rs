@@ -48,6 +48,19 @@ impl Predictor {
         self.position
     }
 
+    /// Handles a `Respawned` event for *this* client's own player
+    /// (Milestone 13): snaps prediction straight to the server-assigned
+    /// spawn point and discards buffered history, since every buffered
+    /// entry predicts a position computed from *before* the teleport and
+    /// replaying any of them from the new position would be meaningless.
+    /// `next_input_tick` is deliberately left untouched: it's a monotonic
+    /// sequence number the server tracks per player, not a position, and
+    /// doesn't reset on death.
+    pub fn respawn_to(&mut self, position: Vec2) {
+        self.position = position;
+        self.history.clear();
+    }
+
     pub fn advance_frame(
         &mut self,
         frame_time_s: f32,
@@ -205,6 +218,22 @@ mod tests {
                 .history
                 .iter()
                 .all(|entry| entry.input.input_tick > 2)
+        );
+    }
+
+    #[test]
+    fn respawn_snaps_position_and_discards_history_so_replay_cant_undo_it() {
+        let maze = corridor(20);
+        let mut predictor = Predictor::new(Vec2::new(2.5, 0.5));
+        predictor.advance_frame(INPUT_DT_MS / 1000.0, Vec2::new(1.0, 0.0), 0.0, false, &maze);
+        assert!(!predictor.history.is_empty(), "test setup should have queued history");
+
+        predictor.respawn_to(Vec2::new(10.5, 0.5));
+
+        assert_eq!(predictor.position(), Vec2::new(10.5, 0.5));
+        assert!(
+            predictor.history.is_empty(),
+            "stale pre-respawn history must not survive to be replayed later"
         );
     }
 
